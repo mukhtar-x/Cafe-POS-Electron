@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base Reset & Typography ───────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+html {
+  --app-font-scale: 1;
+  font-size: clamp(13.6px, calc(16px * var(--app-font-scale)), 21.6px);
+}
+
+body {
+  background-color: #FDFBF7;
+  color: #2C221E;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* ─── Custom Scrollbar — warm parchment tones ────────────────────────────── */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: #F5EDE0;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb {
+  background: #CEB49B;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #A8825E;
+}
+
+/* ─── Component Utilities ────────────────────────────────────────────────── */
+@layer components {
+  /* Touch-safe button press animation */
+  .press-btn {
+    @apply transition-all duration-75 active:scale-[0.96] active:brightness-95;
+  }
+
+  /* Item card in menu grid */
+  .menu-card {
+    @apply bg-white border border-cream-300 rounded-2xl p-4 flex flex-col justify-between
+           shadow-warm-sm cursor-pointer
+           hover:border-amber-400 hover:shadow-warm hover:bg-cream-50
+           transition-all duration-150 press-btn select-none;
+  }
+
+  .menu-card--active {
+    @apply bg-amber-50 border-amber-500 shadow-warm ring-2 ring-amber-400/30;
+  }
+
+  /* Standard form input */
+  .cafe-input {
+    @apply w-full bg-cream-50 border border-cream-300 rounded-xl px-4 py-2.5 text-coffee-800
+           placeholder-coffee-300 focus:outline-none focus:border-amber-500
+           focus:ring-2 focus:ring-amber-400/20 transition-colors text-sm;
+  }
+
+  /* Pill / badge */
+  .cafe-badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+}
+
+/* ─── No scrollbar utility ───────────────────────────────────────────────── */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+.modal-backdrop { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; min-height: 100%; z-index: 50; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
