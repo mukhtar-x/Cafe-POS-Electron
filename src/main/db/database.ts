@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'crypto';
 import { app } from 'electron';
-import { Product, CafeTable, Order, PosSettings, PosStats, CounterSalesStat, ChannelSalesStat, AuditLog } from '../../types/pos';
+import { Product, CafeTable, Order, PosSettings, PosStats, CounterSalesStat, ChannelSalesStat, AuditLog, CreateOrderPayload, PaymentMethod } from '../../types/pos';
 
 // Keep this filename stable across releases. Existing installs are migrated in place below.
 const DATABASE_FILENAME = 'pos_production.db';
@@ -90,7 +90,9 @@ function createSchema(database: Database.Database) {
       category TEXT NOT NULL,
       price REAL NOT NULL,
       stock INTEGER DEFAULT 100,
-      variant TEXT
+      variant TEXT,
+      available INTEGER NOT NULL DEFAULT 1,
+      low_stock_threshold INTEGER NOT NULL DEFAULT 10
     );
   `);
 
@@ -119,6 +121,11 @@ function createSchema(database: Database.Database) {
       items_json TEXT NOT NULL,
       receipt_json TEXT,
       total_amount REAL NOT NULL,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      payment_method TEXT NOT NULL DEFAULT 'cash',
+      cash_tendered REAL NOT NULL DEFAULT 0,
+      card_amount REAL NOT NULL DEFAULT 0,
+      change_due REAL NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       voided_at TEXT,
       synced INTEGER DEFAULT 1
@@ -186,12 +193,19 @@ function migrateSchema(database: Database.Database) {
     if (!tableCols.some(col => col.name === 'active')) database.exec('ALTER TABLE tables ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
     const productCols = database.prepare("PRAGMA table_info(products)").all() as Array<{ name: string }>;
     if (!productCols.some(c => c.name === 'variant')) database.exec('ALTER TABLE products ADD COLUMN variant TEXT');
+    if (!productCols.some(c => c.name === 'available')) database.exec('ALTER TABLE products ADD COLUMN available INTEGER NOT NULL DEFAULT 1');
+    if (!productCols.some(c => c.name === 'low_stock_threshold')) database.exec('ALTER TABLE products ADD COLUMN low_stock_threshold INTEGER NOT NULL DEFAULT 10');
     const cols = database.prepare("PRAGMA table_info(orders)").all() as any[];
     const hasCounter = cols.some(c => c.name === 'counter_name');
     if (!cols.some(c => c.name === 'receipt_json')) database.exec('ALTER TABLE orders ADD COLUMN receipt_json TEXT');
     if (!cols.some(c => c.name === 'voided_at')) database.exec('ALTER TABLE orders ADD COLUMN voided_at TEXT');
     if (!cols.some(c => c.name === 'order_uuid')) database.exec('ALTER TABLE orders ADD COLUMN order_uuid TEXT');
     if (!cols.some(c => c.name === 'shift_id')) database.exec("ALTER TABLE orders ADD COLUMN shift_id TEXT NOT NULL DEFAULT 'legacy'");
+    if (!cols.some(c => c.name === 'discount_amount')) database.exec('ALTER TABLE orders ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0');
+    if (!cols.some(c => c.name === 'payment_method')) database.exec("ALTER TABLE orders ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'");
+    if (!cols.some(c => c.name === 'cash_tendered')) database.exec('ALTER TABLE orders ADD COLUMN cash_tendered REAL NOT NULL DEFAULT 0');
+    if (!cols.some(c => c.name === 'card_amount')) database.exec('ALTER TABLE orders ADD COLUMN card_amount REAL NOT NULL DEFAULT 0');
+    if (!cols.some(c => c.name === 'change_due')) database.exec('ALTER TABLE orders ADD COLUMN change_due REAL NOT NULL DEFAULT 0');
     const assignUuids = database.prepare("SELECT id FROM orders WHERE order_uuid IS NULL OR order_uuid = ''").all() as Array<{ id: number }>;
     const updateUuid = database.prepare('UPDATE orders SET order_uuid = ? WHERE id = ?');
     for (const row of assignUuids) updateUuid.run(randomUUID(), row.id);
@@ -234,12 +248,17 @@ function migrateSchema(database: Database.Database) {
           items_json TEXT NOT NULL,
           receipt_json TEXT,
           total_amount REAL NOT NULL,
+          discount_amount REAL NOT NULL DEFAULT 0,
+          payment_method TEXT NOT NULL DEFAULT 'cash',
+          cash_tendered REAL NOT NULL DEFAULT 0,
+          card_amount REAL NOT NULL DEFAULT 0,
+          change_due REAL NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
           voided_at TEXT,
           synced INTEGER DEFAULT 1
         );
-        INSERT INTO orders_v2 (id, order_uuid, shift_id, token_no, table_id, type, counter_name, items_json, receipt_json, total_amount, created_at, voided_at, synced)
-        SELECT id, COALESCE(order_uuid, lower(hex(randomblob(16)))), COALESCE(shift_id, 'legacy'), token_no, table_id, type, 'Counter 1', items_json, receipt_json, total_amount, created_at, voided_at, synced FROM orders;
+        INSERT INTO orders_v2 (id, order_uuid, shift_id, token_no, table_id, type, counter_name, items_json, receipt_json, total_amount, discount_amount, payment_method, cash_tendered, card_amount, change_due, created_at, voided_at, synced)
+        SELECT id, COALESCE(order_uuid, lower(hex(randomblob(16)))), COALESCE(shift_id, 'legacy'), token_no, table_id, type, 'Counter 1', items_json, receipt_json, total_amount, COALESCE(discount_amount, 0), COALESCE(payment_method, 'cash'), COALESCE(cash_tendered, 0), COALESCE(card_amount, 0), COALESCE(change_due, 0), created_at, voided_at, synced FROM orders;
         DROP TABLE orders;
         ALTER TABLE orders_v2 RENAME TO orders;
         CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
@@ -264,28 +283,33 @@ export function peekNextTokenNumber(): number {
 }
 
 /**
- * Seed Chai Fusion Cafe menu items, tables, and settings for a new or empty database.
+ * Seed CAFE POS menu items, tables, and settings for a new or empty database.
  */
 function seedInitialData(database: Database.Database) {
   // Check if products exist
   const count = (database.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number }).count;
   if (count === 0) {
-    console.log('[Database] Seeding Chai Fusion Cafe core menu...');
+    console.log('[Database] Seeding CAFE POS core menu...');
     const insertProduct = database.prepare(
-      'INSERT INTO products (name, category, price, stock) VALUES (@name, @category, @price, @stock)'
+      'INSERT INTO products (name, category, price, stock, available, low_stock_threshold) VALUES (@name, @category, @price, @stock, 1, 10)'
     );
 
     const initialMenu = [
-      { name: 'Zinger Burger', category: 'Burgers', price: 400, stock: 100 },
-      { name: 'Club Sandwich', category: 'Sandwiches', price: 400, stock: 100 },
-      { name: 'Cheese Club Sandwich', category: 'Sandwiches', price: 430, stock: 100 },
-      { name: 'Chicken Cheese Paratha', category: 'Paratha', price: 400, stock: 100 },
-      { name: 'Aloo Paratha', category: 'Paratha', price: 200, stock: 100 },
-      { name: 'Loaded Fries', category: 'Fries', price: 300, stock: 100 },
-      { name: 'Mayo Garlic Fries', category: 'Fries', price: 220, stock: 100 },
-      { name: 'Zinger Crispy Roll', category: 'Rolls', price: 260, stock: 100 },
-      { name: 'Chicken Cheese Roll', category: 'Rolls', price: 300, stock: 100 },
-      { name: 'Quarter Breast Broast', category: 'Broast', price: 480, stock: 100 },
+      { name: 'Espresso', category: 'Coffee', price: 180, stock: 80 },
+      { name: 'Americano', category: 'Coffee', price: 220, stock: 80 },
+      { name: 'Caffe Latte', category: 'Coffee', price: 280, stock: 80 },
+      { name: 'Cappuccino', category: 'Coffee', price: 280, stock: 80 },
+      { name: 'Mocha', category: 'Coffee', price: 320, stock: 60 },
+      { name: 'Cold Brew', category: 'Coffee', price: 300, stock: 50 },
+      { name: 'Butter Croissant', category: 'Bakery', price: 190, stock: 40 },
+      { name: 'Blueberry Muffin', category: 'Bakery', price: 170, stock: 36 },
+      { name: 'Chocolate Cookie', category: 'Bakery', price: 120, stock: 48 },
+      { name: 'Banana Bread', category: 'Bakery', price: 160, stock: 24 },
+      { name: 'Cinnamon Roll', category: 'Bakery', price: 210, stock: 20 },
+      { name: 'Ceramic Mug', category: 'Merch', price: 850, stock: 18 },
+      { name: 'Canvas Tote', category: 'Merch', price: 650, stock: 15 },
+      { name: 'Travel Tumbler', category: 'Merch', price: 1200, stock: 12 },
+      { name: 'Gift Card', category: 'Merch', price: 1000, stock: 40 },
     ];
 
     const insertMany = database.transaction((items) => {
@@ -310,16 +334,17 @@ function seedInitialData(database: Database.Database) {
 
   // Seed default settings
   const defaultSettings: Record<string, string> = {
-    cafe_name: 'Chai Fusion Cafe',
-    cafe_address: 'Plot A-38, Abdullah Sports City, near Sehat Hospital, Qasimabad, Hyderabad',
+    cafe_name: 'CAFE POS',
+    cafe_address: '',
     phone: '',
     currency: 'Rs.',
-    tax_rate: '0',
-    counter_name: 'Counter 1 - Main Laptop',
+    tax_rate: '8',
+    counter_name: 'Counter 1',
     print_receipt_on_checkout: 'false',
     printer_interface: 'none',
     p2p_sync: 'false',
     font_scale: '1',
+    theme: 'light',
     terminal_id: 'CPOS-' + randomUUID().split('-')[0].toUpperCase(),
     printer_ip: '192.168.1.200',
     printer_port: '9100',
@@ -492,9 +517,14 @@ export const dbDao = {
   addProduct(product: Omit<Product, 'id'>): Product {
     const database = getDb();
     const info = database.prepare(
-      'INSERT INTO products (name, category, price, stock, variant) VALUES (@name, @category, @price, @stock, @variant)'
-    ).run({ ...product, variant: product.variant?.trim() || null });
-    return { ...product, variant: product.variant?.trim() || null, id: Number(info.lastInsertRowid) };
+      'INSERT INTO products (name, category, price, stock, variant, available, low_stock_threshold) VALUES (@name, @category, @price, @stock, @variant, @available, @low_stock_threshold)'
+    ).run({
+      ...product,
+      variant: product.variant?.trim() || null,
+      available: product.available === 0 ? 0 : 1,
+      low_stock_threshold: Number.isInteger(product.low_stock_threshold) ? product.low_stock_threshold : 10,
+    });
+    return { ...product, variant: product.variant?.trim() || null, available: product.available === 0 ? 0 : 1, id: Number(info.lastInsertRowid) };
   },
 
   updateProduct(id: number, product: Partial<Product>): void {
@@ -507,6 +537,8 @@ export const dbDao = {
     if (product.price !== undefined) { sets.push('price = @price'); params.price = product.price; }
     if (product.stock !== undefined) { sets.push('stock = @stock'); params.stock = product.stock; }
     if (product.variant !== undefined) { sets.push('variant = @variant'); params.variant = product.variant; }
+    if (product.available !== undefined) { sets.push('available = @available'); params.available = product.available ? 1 : 0; }
+    if (product.low_stock_threshold !== undefined) { sets.push('low_stock_threshold = @low_stock_threshold'); params.low_stock_threshold = product.low_stock_threshold; }
 
     if (sets.length > 0) {
       database.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id = @id`).run(params);
@@ -558,31 +590,40 @@ export const dbDao = {
   },
 
   // Orders
-  createOrder(orderData: {
-    table_id: number | null;
-    terminal_id?: string;
-    type: 'dine-in' | 'takeaway' | 'walk-in';
-    counter_name?: string;
-    operator?: string;
-    items_json: string;
-    total_amount: number;
-    order_uuid?: string;
-  }): Order {
+  createOrder(orderData: CreateOrderPayload): Order {
     const database = getDb();
     const settings = this.getSettings();
     const orderUuid = orderData.order_uuid || randomUUID();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(orderUuid)) throw new Error('Receipt identifier is invalid.');
     const counter = orderData.counter_name || settings.counter_name || 'Counter 1';
-    let parsedItems: Array<{ id: number; name: string; variant?: string | null; price: number; quantity: number }>; 
+    let parsedItems: Array<{ id: number; name: string; variant?: string | null; price: number; quantity: number; notes?: string }>;
     try { parsedItems = JSON.parse(orderData.items_json); } catch { throw new Error('Receipt items are not valid JSON.'); }
-    if (!Array.isArray(parsedItems) || parsedItems.length === 0 || parsedItems.length > 100 || parsedItems.some(item => !item || !Number.isInteger(item.id) || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 120 || !Number.isFinite(item.price) || item.price < 0 || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 1000)) throw new Error('Receipt contains invalid items.');
+    if (!Array.isArray(parsedItems) || parsedItems.length === 0 || parsedItems.length > 100 || parsedItems.some(item => !item || !Number.isInteger(item.id) || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 120 || !Number.isFinite(item.price) || item.price < 0 || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 1000 || (item.notes !== undefined && (typeof item.notes !== 'string' || item.notes.length > 200)))) throw new Error('Receipt contains invalid items.');
     const subtotal = parsedItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const discountAmount = Number.isFinite(orderData.discount_amount) ? Math.max(0, Number(orderData.discount_amount)) : 0;
+    if (discountAmount > subtotal + 0.02) throw new Error('Discount cannot exceed the subtotal.');
     const taxRate = Number(settings.tax_rate || 0);
-    const expectedTotal = subtotal * (1 + taxRate / 100);
-    if (!Number.isFinite(orderData.total_amount) || Math.abs(expectedTotal - orderData.total_amount) > 0.02) throw new Error('Receipt total does not match its items and tax.');
+    const taxable = Math.max(0, subtotal - discountAmount);
+    const expectedTotal = taxable * (1 + taxRate / 100);
+    if (!Number.isFinite(orderData.total_amount) || Math.abs(expectedTotal - orderData.total_amount) > 0.02) throw new Error('Receipt total does not match its items, discount, and tax.');
+    const paymentMethod: PaymentMethod = orderData.payment_method === 'card' || orderData.payment_method === 'split' ? orderData.payment_method : 'cash';
+    const cashTendered = Number.isFinite(orderData.cash_tendered) ? Math.max(0, Number(orderData.cash_tendered)) : 0;
+    const cardAmount = Number.isFinite(orderData.card_amount) ? Math.max(0, Number(orderData.card_amount)) : 0;
+    const total = orderData.total_amount;
+    if (paymentMethod === 'cash') {
+      if (cashTendered + 0.02 < total) throw new Error('Cash tendered is less than the amount due.');
+    } else if (paymentMethod === 'card') {
+      if (Math.abs(cardAmount - total) > 0.02) throw new Error('Card payment must cover the full amount due.');
+    } else if (Math.abs(cashTendered + cardAmount - total) > 0.02) {
+      throw new Error('Split payments must add up to the amount due.');
+    }
+    const changeDue = paymentMethod === 'cash' ? Math.max(0, cashTendered - total) : 0;
     if (orderData.type === 'dine-in' && (!orderData.table_id || !this.getTables().some(table => table.id === orderData.table_id))) throw new Error('Dine-in table does not exist.');
     const productsById = new Map(this.getProducts().map(product => [product.id, product]));
-    if (parsedItems.some(item => { const product = productsById.get(item.id); return !product || product.name !== item.name || Math.abs(product.price - item.price) > 0.001 || (item.variant || null) !== (product.variant || null); })) throw new Error('Menu prices changed. Refresh the bill and try again.');
+    if (parsedItems.some(item => {
+      const product = productsById.get(item.id);
+      return !product || product.available === 0 || product.stock < item.quantity || product.name !== item.name || Math.abs(product.price - item.price) > 0.001 || (item.variant || null) !== (product.variant || null);
+    })) throw new Error('An item is unavailable, out of stock, or its price changed. Refresh the bill and try again.');
 
     // Use a transaction to ensure atomic token generation, order insert, and table status update
     const txn = database.transaction(() => {
@@ -595,12 +636,32 @@ export const dbDao = {
       const createdAt = new Date().toISOString();
 
       const tableNo = orderData.table_id ? (database.prepare('SELECT table_no FROM tables WHERE id = ?').get(orderData.table_id) as { table_no: string } | undefined)?.table_no || null : null;
-      const receiptSnapshot = JSON.stringify({ version: 1, order_uuid: orderUuid, shift_id: activeShift.shift_id, terminal_id: orderData.terminal_id || settings.terminal_id, cafe_name: settings.cafe_name, cafe_address: settings.cafe_address, phone: settings.phone, currency: settings.currency, tax_rate: taxRate, subtotal, tax_amount: orderData.total_amount - subtotal, cashier: orderData.operator || '', counter_name: counter, table_no: tableNo });
+      const receiptSnapshot = JSON.stringify({
+        version: 2,
+        order_uuid: orderUuid,
+        shift_id: activeShift.shift_id,
+        terminal_id: orderData.terminal_id || settings.terminal_id,
+        cafe_name: settings.cafe_name,
+        cafe_address: settings.cafe_address,
+        phone: settings.phone,
+        currency: settings.currency,
+        tax_rate: taxRate,
+        subtotal,
+        discount_amount: discountAmount,
+        tax_amount: orderData.total_amount - taxable,
+        cashier: orderData.operator || '',
+        counter_name: counter,
+        table_no: tableNo,
+        payment_method: paymentMethod,
+        cash_tendered: cashTendered,
+        card_amount: cardAmount,
+        change_due: changeDue,
+      });
 
       const info = database.prepare(`
-        INSERT INTO orders (order_uuid, shift_id, token_no, table_id, type, counter_name, items_json, receipt_json, total_amount, created_at, synced)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-      `).run(orderUuid, activeShift.shift_id, tokenNo, orderData.table_id, orderData.type, counter, orderData.items_json, receiptSnapshot, orderData.total_amount, createdAt);
+        INSERT INTO orders (order_uuid, shift_id, token_no, table_id, type, counter_name, items_json, receipt_json, total_amount, discount_amount, payment_method, cash_tendered, card_amount, change_due, created_at, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run(orderUuid, activeShift.shift_id, tokenNo, orderData.table_id, orderData.type, counter, orderData.items_json, receiptSnapshot, orderData.total_amount, discountAmount, paymentMethod, cashTendered, cardAmount, changeDue, createdAt);
 
       // If dine-in, mark table as occupied
       if (orderData.type === 'dine-in' && orderData.table_id) {
@@ -610,10 +671,11 @@ export const dbDao = {
       // Also deduct product stocks
       try {
         const items = JSON.parse(orderData.items_json);
-        const updateStock = database.prepare('UPDATE products SET stock = MAX(0, stock - ?) WHERE id = ?');
+        const updateStock = database.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?');
         for (const item of items) {
           if (item.id && item.quantity) {
-            updateStock.run(item.quantity, item.id);
+            const result = updateStock.run(item.quantity, item.id, item.quantity);
+            if (result.changes !== 1) throw new Error('Stock changed during checkout. Refresh the bill and try again.');
           }
         }
       } catch (e) {
@@ -633,6 +695,11 @@ export const dbDao = {
         items_json: orderData.items_json,
         receipt_json: receiptSnapshot,
         total_amount: orderData.total_amount,
+        discount_amount: discountAmount,
+        payment_method: paymentMethod,
+        cash_tendered: cashTendered,
+        card_amount: cardAmount,
+        change_due: changeDue,
         created_at: createdAt,
         synced: 1
       };

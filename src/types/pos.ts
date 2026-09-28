@@ -5,6 +5,8 @@ export interface Product {
   price: number;
   stock: number;
   variant?: string | null;
+  available?: number;
+  low_stock_threshold?: number;
 }
 
 export interface CafeTable {
@@ -19,6 +21,16 @@ export interface CartItem {
   notes?: string;
 }
 
+export type PaymentMethod = 'cash' | 'card' | 'split';
+export type DiscountType = 'none' | 'percent' | 'amount';
+
+export interface PaymentDetails {
+  method: PaymentMethod;
+  cashTendered: number;
+  cardAmount: number;
+  changeDue: number;
+}
+
 export interface OrderItemRecord {
   id: number;
   name: string;
@@ -27,6 +39,7 @@ export interface OrderItemRecord {
   price: number;
   quantity: number;
   subtotal: number;
+  notes?: string;
 }
 
 export type OrderType = 'dine-in' | 'takeaway' | 'walk-in';
@@ -43,6 +56,11 @@ export interface Order {
   items_json: string;
   items?: OrderItemRecord[];
   total_amount: number;
+  discount_amount?: number;
+  payment_method?: PaymentMethod;
+  cash_tendered?: number;
+  card_amount?: number;
+  change_due?: number;
   created_at: string;
   synced?: number;
   receipt_json?: string;
@@ -64,6 +82,7 @@ export interface PosSettings {
   printer_port?: string;
   p2p_sync: 'true' | 'false';
   font_scale: string;
+  theme: 'light' | 'dark';
   terminal_id: string;
   lan_mode: 'primary' | 'secondary';
   lan_primary_ip: string;
@@ -108,6 +127,22 @@ export interface PosStats {
   activeTablesCount: number;
   counterBreakdown: CounterSalesStat[];
   channelBreakdown: ChannelSalesStat;
+}
+
+export interface CreateOrderPayload {
+  table_id: number | null;
+  type: OrderType;
+  counter_name?: string;
+  terminal_id?: string;
+  operator?: string;
+  items_json: string;
+  total_amount: number;
+  discount_amount?: number;
+  payment_method?: PaymentMethod;
+  cash_tendered?: number;
+  card_amount?: number;
+  change_due?: number;
+  order_uuid?: string;
 }
 
 export interface AuditLog {

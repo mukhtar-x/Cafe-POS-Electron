@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, IpcMainInvokeEvent, Tray, Menu, nativeImage } from 'electron';
 import { randomUUID } from 'crypto';
 import { UserCredential } from '../types/auth';
 import { writeFile } from 'fs/promises';
@@ -8,10 +8,44 @@ import { initDatabase, dbDao, exportDatabaseBackup, restoreDatabaseBackup, reset
 import { initializeLogIsolation } from './logger';
 import { printReceipt } from './printer/escpos';
 import { startLanServer, getLanStatus, checkPrimaryConnection, getLocalIpAddress, configureLanSync, getPrimaryAddress } from './network/lanSync';
-import { Product, CafeTable, Order, PosSettings, AnalyticsReport } from '../types/pos';
+import { Product, CafeTable, Order, PosSettings, AnalyticsReport, CreateOrderPayload } from '../types/pos';
 
 export { initDatabase, dbDao, printReceipt, startLanServer, getLanStatus };
+
+// --- 1. Branding & Taskbar Identity ---
+if (app) {
+    app.name = 'CAFE POS';
+    if (process.platform === 'win32') {
+        app.setAppUserModelId('com.pakcafe.pos');
+    }
+
+    // --- 2. Sandbox & Startup Hardening ---
+    // Prevent Chromium sandbox crashes and setuid errors on restricted user accounts (Linux AppArmor/namespaces)
+    if (process.platform === 'linux') {
+        app.commandLine.appendSwitch('no-sandbox');
+        app.commandLine.appendSwitch('disable-setuid-sandbox');
+        app.commandLine.appendSwitch('disable-namespace-sandbox');
+    }
+
+    // --- 3. Hardware Acceleration Fallback Hardening ---
+    // Handle older GPUs/CPUs gracefully (e.g., Intel Haswell / HD Graphics 4000/4400/4600) without crashing
+    app.commandLine.appendSwitch('disable-gpu-sandbox');
+    app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+
+    // Monitor GPU process failures and let Chromium fall back smoothly to SwiftShader software rendering
+    app.on('child-process-gone', (_event, details) => {
+        if (details.type === 'GPU') {
+            console.warn(`[Hardware] GPU process exited (${details.reason}, code: ${details.exitCode}). Chromium will fall back to software rendering.`);
+        }
+    });
+
+    (app as any).on?.('gpu-process-crashed', (_event: any, killed: boolean) => {
+        console.warn(`[Hardware] GPU process crashed (killed: ${killed}). Continuing with software rendering fallback.`);
+    });
+}
+
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let pendingSecondInstanceFocus = false;
 let isQuitting = false;
 let shutdownInProgress = false;
@@ -118,13 +152,51 @@ if (!hasSingleInstanceLock) {
 // Determine paths
 const isDev = process.env.NODE_ENV === 'development' || !(app && app.isPackaged);
 
+function resolveAppIcon(): string {
+    const isWin = process.platform === 'win32';
+    const packagedIco = path.join(process.resourcesPath, 'icon.ico');
+    const packagedPng = path.join(process.resourcesPath, 'icon.png');
+    const fromBuildIco = path.join(__dirname, '../../build/icon.ico');
+    const fromBuildPng = path.join(__dirname, '../../build/icon.png');
+    const fromRenderer = path.join(__dirname, '../../src/renderer/public/icon.png');
+
+    if (app.isPackaged) {
+        if (isWin && fsExists(packagedIco)) return packagedIco;
+        if (fsExists(packagedPng)) return packagedPng;
+    }
+    if (isWin && fsExists(fromBuildIco)) return fromBuildIco;
+    if (fsExists(fromBuildPng)) return fromBuildPng;
+    return fromRenderer;
+}
+
+function fsExists(filePath: string): boolean {
+    try { return require('fs').existsSync(filePath); } catch { return false; }
+}
+
+function createTray(window: BrowserWindow): void {
+    if (tray) return;
+    const image = nativeImage.createFromPath(resolveAppIcon());
+    tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 24, height: 24 }));
+    tray.setToolTip('CAFE POS');
+    tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'Show CAFE POS', click: () => { window.show(); window.focus(); } },
+        { type: 'separator' },
+        { label: 'Quit', click: () => beginGracefulShutdown(true) },
+    ]));
+    tray.on('click', () => {
+        if (window.isVisible()) window.focus();
+        else { window.show(); window.focus(); }
+    });
+}
+
 function createWindow() {
     const window = new BrowserWindow({
-        width: 1280,
-        height: 800,
+        width: 1400,
+        height: 900,
         minWidth: 1024,
         minHeight: 700,
-        title: 'Cafe POS Pakistan - Offline-First Point of Sale',
+        title: 'CAFE POS',
+        icon: resolveAppIcon(),
         webPreferences: {
             preload: path.join(__dirname, '../preload/index.js'),
             nodeIntegration: false,
@@ -135,6 +207,12 @@ function createWindow() {
         show: false,
     });
     mainWindow = window;
+
+    // Enforce window title strictly as CAFE POS
+    window.on('page-title-updated', (event) => {
+        event.preventDefault();
+        window.setTitle('CAFE POS');
+    });
     // Capture this while webContents is alive; the 'closed' callback must never dereference it.
     const ownedWebContentsId = window.webContents.id;
 
@@ -153,6 +231,7 @@ function createWindow() {
         try {
             if (window.isDestroyed() || mainWindow !== window) return;
             window.show();
+            createTray(window);
             if (pendingSecondInstanceFocus) { window.focus(); pendingSecondInstanceFocus = false; }
         } catch (error) { console.warn('[Main] Window ready handler failed:', error); }
     });

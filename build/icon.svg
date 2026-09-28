@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CAFE POS">
+  <rect width="512" height="512" rx="112" fill="#2C221E"/>
+  <path fill="#F59E0B" d="M168 118c18-28 52-28 70 0 18-28 52-28 70 0 8 12 6 22-2 28-16-18-38-10-44 8-16-22-42-16-50 6-16-22-42-18-50-4-10-8-10-22 6-38z"/>
+  <path fill="#FDFBF7" d="M146 186h196c10 0 18 8 18 18v132c0 48-40 88-88 88h-56c-48 0-88-40-88-88V204c0-10 8-18 18-18z"/>
+  <path fill="#EDE0CE" d="M342 220h28c28 0 52 22 52 50s-24 50-52 50h-16"/>
+  <path fill="none" stroke="#A8825E" stroke-width="14" stroke-linecap="round" d="M370 232c18 4 32 18 32 38s-14 34-32 38"/>
+  <rect x="286" y="268" width="132" height="168" rx="16" fill="#FDFBF7" stroke="#C4A484" stroke-width="8"/>
+  <path fill="none" stroke="#CEB49B" stroke-width="8" stroke-linecap="round" d="M308 304h88M308 332h72M308 360h80"/>
+  <circle cx="386" cy="400" r="28" fill="#10B981"/>
+  <path fill="none" stroke="#ECFDF5" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" d="M374 400l8 8 16-18"/>
+</svg>

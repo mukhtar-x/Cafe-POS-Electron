@@ -5,6 +5,7 @@ import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
 
 export default defineConfig({
+  base: './',
   root: path.resolve(__dirname, 'src/renderer'),
   plugins: [
     react(),
