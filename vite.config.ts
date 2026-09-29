@@ -5,49 +5,49 @@ import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
 
 export default defineConfig({
-  base: './',
-  root: path.resolve(__dirname, 'src/renderer'),
-  plugins: [
-    react(),
-    electron([
-      {
-        entry: path.resolve(__dirname, 'src/main/index.ts'),
-        onstart(options) {
-          options.startup();
-        },
-        vite: {
-          build: {
-            outDir: path.resolve(__dirname, 'dist-electron/main'),
-            rollupOptions: {
-              external: ['better-sqlite3', 'express', 'cors'],
+    base: './',
+    root: path.resolve(__dirname, 'src/renderer'),
+    plugins: [
+        react(),
+        electron([
+            {
+                entry: path.resolve(__dirname, 'src/main/index.ts'),
+                onstart(options) {
+                    options.startup();
+                },
+                vite: {
+                    build: {
+                        outDir: path.resolve(__dirname, 'dist-electron/main'),
+                        rollupOptions: {
+                            external: ['better-sqlite3'],
+                        },
+                    },
+                },
             },
-          },
-        },
-      },
-      {
-        entry: path.resolve(__dirname, 'src/preload/index.ts'),
-        onstart(options) {
-          options.reload();
-        },
-        vite: {
-          build: {
-            outDir: path.resolve(__dirname, 'dist-electron/preload'),
-          },
-        },
-      },
-    ]),
-    renderer(),
-  ],
-  build: {
-    outDir: path.resolve(__dirname, 'dist'),
-    emptyOutDir: true,
-  },
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src/renderer/src'),
+            {
+                entry: path.resolve(__dirname, 'src/preload/index.ts'),
+                onstart(options) {
+                    options.reload();
+                },
+                vite: {
+                    build: {
+                        outDir: path.resolve(__dirname, 'dist-electron/preload'),
+                    },
+                },
+            },
+        ]),
+        renderer(),
+    ],
+    build: {
+        outDir: path.resolve(__dirname, 'dist'),
+        emptyOutDir: true,
     },
-  },
-  server: {
-    port: 5173,
-  },
+    resolve: {
+        alias: {
+            '@': path.resolve(__dirname, 'src/renderer/src'),
+        },
+    },
+    server: {
+        port: 5173,
+    },
 });

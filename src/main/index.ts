@@ -1,16 +1,15 @@
 import { app, BrowserWindow, ipcMain, dialog, IpcMainInvokeEvent, Tray, Menu, nativeImage } from 'electron';
 import { randomUUID } from 'crypto';
-import { UserCredential } from '../types/auth';
+import { AdminOverrideGrant, AdminOverrideScope, UserCredential } from '../types/auth';
 import { writeFile } from 'fs/promises';
 import path from 'path';
 import { isIP } from 'net';
 import { initDatabase, dbDao, exportDatabaseBackup, restoreDatabaseBackup, resetApplicationData, flushDatabase } from './db/database';
 import { initializeLogIsolation } from './logger';
-import { printReceipt } from './printer/escpos';
-import { startLanServer, getLanStatus, checkPrimaryConnection, getLocalIpAddress, configureLanSync, getPrimaryAddress } from './network/lanSync';
-import { Product, CafeTable, Order, PosSettings, AnalyticsReport, CreateOrderPayload } from '../types/pos';
+import { printReceipt, printChefToken } from './printer/escpos';
+import { Product, Order, AnalyticsReport } from '../types/pos';
 
-export { initDatabase, dbDao, printReceipt, startLanServer, getLanStatus };
+export { initDatabase, dbDao, printReceipt, printChefToken };
 
 // --- 1. Branding & Taskbar Identity ---
 if (app) {
@@ -78,11 +77,6 @@ function beginGracefulShutdown(shouldQuitApp: boolean, closingWindow?: BrowserWi
     shutdownInProgress = true;
     void (async () => {
         await waitForCriticalOperations();
-        // Stop sockets/timers before flushing. A stuck LAN close must never hold the UI open.
-        await Promise.race([
-            configureLanSync(false, 'primary', 49200).catch(error => console.warn('[P2P] Cleanup on quit failed:', error)),
-            new Promise<void>(resolve => setTimeout(resolve, 500)),
-        ]);
         await new Promise<void>(resolve => setTimeout(resolve, 200));
         try { flushDatabase(); }
         catch (error) { console.error('[Database] Final WAL checkpoint failed:', error); }
@@ -106,28 +100,73 @@ function beginGracefulShutdown(shouldQuitApp: boolean, closingWindow?: BrowserWi
 
 interface MainSession { user: UserCredential; webContentsId: number; }
 const mainSessions = new Map<string, MainSession>();
+interface StoredAdminOverride extends AdminOverrideGrant { sessionToken: string; webContentsId: number; expiresAt: number; }
+const adminOverrideGrants = new Map<string, StoredAdminOverride>();
+const failedAdminPinAttempts = new Map<number, number[]>();
+const ADMIN_OVERRIDE_TTL_MS = 60_000;
+const ADMIN_PIN_WINDOW_MS = 60_000;
+const ADMIN_PIN_MAX_ATTEMPTS = 5;
+const ADMIN_OVERRIDE_SCOPES = new Set<AdminOverrideScope>(['order:void', 'menu:add', 'menu:update', 'menu:delete', 'settings:write']);
 
 function issueSession(event: IpcMainInvokeEvent, user: UserCredential): string {
-    for (const [token, session] of mainSessions) if (session.webContentsId === event.sender.id) mainSessions.delete(token);
+    for (const [token, session] of mainSessions) {
+        if (session.webContentsId !== event.sender.id) continue;
+        mainSessions.delete(token);
+        for (const [grantToken, grant] of adminOverrideGrants) if (grant.webContentsId === event.sender.id) adminOverrideGrants.delete(grantToken);
+    }
     const token = randomUUID();
     mainSessions.set(token, { user, webContentsId: event.sender.id });
     return token;
 }
 
 function requireSession(event: IpcMainInvokeEvent, token: unknown, roles?: readonly UserCredential['role'][]): MainSession {
-  if (typeof token !== 'string' || token.length < 32) throw new Error('Sign in again to continue.');
+    if (typeof token !== 'string' || token.length < 32) throw new Error('Sign in again to continue.');
     const session = mainSessions.get(token);
     if (!session || session.webContentsId !== event.sender.id) throw new Error('Your local session has expired. Sign in again.');
     if (roles && !roles.includes(session.user.role)) throw new Error('This action requires manager authorization.');
     return session;
 }
 
-function boundedLimit(value: unknown, fallback = 20): number {
-    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? Math.min(value, 500) : fallback;
+function clearAdminOverridesForSession(sessionToken: string): void {
+    for (const [token, grant] of adminOverrideGrants) if (grant.sessionToken === sessionToken) adminOverrideGrants.delete(token);
 }
 
-function isValidPort(value: unknown): value is string {
-    return typeof value === "string" && /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 65535;
+function issueAdminOverride(event: IpcMainInvokeEvent, sessionToken: string, scope: AdminOverrideScope, adminUsername: string): AdminOverrideGrant {
+    const now = Date.now();
+    for (const [token, grant] of adminOverrideGrants) if (grant.expiresAt < now) adminOverrideGrants.delete(token);
+    const authorizationToken = randomUUID();
+    adminOverrideGrants.set(authorizationToken, {
+        authorizationToken,
+        adminUsername,
+        scope,
+        sessionToken,
+        webContentsId: event.sender.id,
+        expiresAt: now + ADMIN_OVERRIDE_TTL_MS,
+    });
+    return { authorizationToken, adminUsername, scope };
+}
+
+function consumeAdminOverride(event: IpcMainInvokeEvent, sessionToken: string, authorizationToken: unknown, scope: AdminOverrideScope): { session: MainSession; grant: AdminOverrideGrant } {
+    const session = requireSession(event, sessionToken);
+    const stored = typeof authorizationToken === 'string' ? adminOverrideGrants.get(authorizationToken) : undefined;
+    const valid = stored
+        && stored.sessionToken === sessionToken
+        && stored.webContentsId === event.sender.id
+        && stored.scope === scope
+        && stored.expiresAt >= Date.now();
+    if (!valid) {
+        if (typeof authorizationToken === 'string') adminOverrideGrants.delete(authorizationToken);
+        dbDao.addAuditLog('ADMIN_OVERRIDE_REJECTED', session.user.username, `Rejected ${scope} operation: missing, expired, or mismatched authorization grant.`);
+        throw new Error('Admin authorization expired or does not match this action. Verify the PIN again.');
+    }
+    adminOverrideGrants.delete(stored.authorizationToken);
+    const grant = { authorizationToken: stored.authorizationToken, adminUsername: stored.adminUsername, scope: stored.scope };
+    dbDao.addAuditLog('ADMIN_OVERRIDE_USED', stored.adminUsername, `${scope} operation authorized for employee ${session.user.username}.`);
+    return { session, grant };
+}
+
+function boundedLimit(value: unknown, fallback = 20): number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? Math.min(value, 500) : fallback;
 }
 
 const MANAGER_ROLES: readonly UserCredential['role'][] = ['admin', 'manager'];
@@ -150,8 +189,6 @@ if (!hasSingleInstanceLock) {
 }
 
 // Determine paths
-const isDev = process.env.NODE_ENV === 'development' || !(app && app.isPackaged);
-
 function resolveAppIcon(): string {
     const isWin = process.platform === 'win32';
     const packagedIco = path.join(process.resourcesPath, 'icon.ico');
@@ -223,7 +260,14 @@ function createWindow() {
     });
 
     window.once('closed', () => {
-        for (const [token, session] of mainSessions) if (session.webContentsId === ownedWebContentsId) mainSessions.delete(token);
+        for (const [token, session] of mainSessions) {
+            if (session.webContentsId !== ownedWebContentsId) continue;
+            try { dbDao.addAuditLog('LOGOUT', session.user.username, `Employee ${session.user.displayName || session.user.username} signed out when the POS window closed`); }
+            catch (error) { console.warn('[Audit] Could not record window-close sign-out:', error); }
+            mainSessions.delete(token);
+            clearAdminOverridesForSession(token);
+        }
+        failedAdminPinAttempts.delete(ownedWebContentsId);
         if (mainWindow === window) mainWindow = null;
     });
 
@@ -255,9 +299,6 @@ if (hasSingleInstanceLock && app && typeof app.whenReady === 'function') {
             initDatabase();
             console.log('[Main] SQLite Database initialized successfully with WAL mode.');
 
-            // 2. Load Settings and Start LAN Server if Primary
-            const settings = dbDao.getSettings();
-            await configureLanSync(settings.p2p_sync === 'true', settings.lan_mode, parseInt(settings.lan_primary_port || '49200', 10));
         } catch (error) {
             console.error('[Main] Initialization error:', error);
         }
@@ -311,20 +352,15 @@ function setupIpcHandlers() {
     });
 
     ipcMain.handle('db:reset-application', async (event, sessionToken: string) => {
-        let previousSettings: PosSettings | null = null;
         try {
             const session = requireSession(event, sessionToken, MANAGER_ROLES);
-            previousSettings = dbDao.getSettings();
-            await configureLanSync(false, previousSettings.lan_mode, Number(previousSettings.lan_primary_port || '49200'));
             const backupPath = resetApplicationData(session.user.username);
             mainSessions.clear();
+            adminOverrideGrants.clear();
+            failedAdminPinAttempts.clear();
             return { success: true, backupFile: path.basename(backupPath) };
         } catch (error) {
             console.error('[Database] Application reset failed:', error);
-            if (previousSettings?.p2p_sync === 'true') {
-                try { await configureLanSync(true, previousSettings.lan_mode, Number(previousSettings.lan_primary_port || '49200')); }
-                catch (syncError) { console.warn('[P2P] Could not restore sync after the failed application reset:', syncError); }
-            }
             return { success: false, error: 'Could not reset the application. Your existing data has been preserved; check the local disk and try again.' };
         }
     });
@@ -343,6 +379,8 @@ function setupIpcHandlers() {
             if (result.canceled || result.filePaths.length === 0) return { success: false, canceled: true };
             restoreDatabaseBackup(result.filePaths[0]);
             mainSessions.clear();
+            adminOverrideGrants.clear();
+            failedAdminPinAttempts.clear();
             return { success: true };
         } catch (error) {
             console.error('[Database] Backup restore failed:', error);
@@ -355,16 +393,17 @@ function setupIpcHandlers() {
         catch (err: any) { return { success: false, error: err instanceof Error ? err.message : 'Could not restart the application.' }; }
     });
 
-    ipcMain.handle('pos:exportReceiptPdf', async (event, html: string, tokenNo: number, heightMm: number, sessionToken: string) => {
+    ipcMain.handle('pos:exportReceiptPdf', async (event, html: string, tokenNo: number, heightMm: number, sessionToken: string, documentKind: 'receipt' | 'chef-token' = 'receipt') => {
         const finishOperation = beginCriticalOperation();
         let pdfWindow: BrowserWindow | null = null;
         try {
             requireSession(event, sessionToken);
             if (typeof html !== 'string' || html.length > 2_000_000 || /<\s*(script|iframe|object|embed)\b/i.test(html) || /<(?:img|link|iframe)\b[^>]*(?:src|href)\s*=\s*["']https?:\/\//i.test(html)) throw new Error('Invalid receipt document.');
             if (!Number.isInteger(tokenNo) || tokenNo < 0 || !Number.isFinite(heightMm) || heightMm < 40 || heightMm > 2000) throw new Error('Invalid receipt dimensions.');
+            if (!['receipt', 'chef-token'].includes(documentKind)) throw new Error('Invalid printable document type.');
             const saveOptions = {
-                title: 'Save receipt as PDF',
-                defaultPath: `Receipt_Token_${String(tokenNo).padStart(3, '0')}.pdf`,
+                title: documentKind === 'chef-token' ? 'Save chef token as PDF' : 'Save receipt as PDF',
+                defaultPath: `${documentKind === 'chef-token' ? 'Chef_Token' : 'Receipt'}_${String(tokenNo).padStart(3, '0')}.pdf`,
                 filters: [{ name: 'PDF document', extensions: ['pdf'] }],
             };
             const parentWindow = getLiveMainWindow();
@@ -389,7 +428,7 @@ function setupIpcHandlers() {
     });
 
 
-  ipcMain.handle('auth:getStatus', () => dbDao.authStatus());
+    ipcMain.handle('auth:getStatus', () => dbDao.authStatus());
     // Login only needs the public store name; do not expose private settings before authentication.
     ipcMain.handle('app:get-cafe-branding', () => {
         try { return { cafe_name: dbDao.getSettings().cafe_name?.trim() || 'Cafe POS' }; }
@@ -407,7 +446,49 @@ function setupIpcHandlers() {
             return { success: Boolean(user), user: user || undefined, sessionToken, error: user ? undefined : 'Invalid username or PIN/password.' };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
-    ipcMain.handle('auth:logout', (event, token: string) => { const session = requireSession(event, token); mainSessions.delete(token); return { success: true, username: session.user.username }; });
+    ipcMain.handle('auth:logout', (event, token: string) => {
+        try {
+            const session = requireSession(event, token);
+            dbDao.addAuditLog('LOGOUT', session.user.username, `Employee ${session.user.displayName || session.user.username} signed out of terminal`);
+            mainSessions.delete(token);
+            clearAdminOverridesForSession(token);
+            failedAdminPinAttempts.delete(event.sender.id);
+            return { success: true, username: session.user.username };
+        } catch {
+            return { success: true };
+        }
+    });
+    ipcMain.handle('auth:verifyAdminPin', (event, pin: string, scope: AdminOverrideScope, sessionToken: string) => {
+        try {
+            const session = requireSession(event, sessionToken);
+            if (!ADMIN_OVERRIDE_SCOPES.has(scope)) throw new Error('Invalid admin authorization scope.');
+            const now = Date.now();
+            const recentFailures = (failedAdminPinAttempts.get(event.sender.id) || []).filter(attempt => now - attempt < ADMIN_PIN_WINDOW_MS);
+            if (recentFailures.length >= ADMIN_PIN_MAX_ATTEMPTS) {
+                dbDao.addAuditLog('ADMIN_PIN_THROTTLED', session.user.username, `Authorization attempt blocked for ${scope} after repeated failures.`);
+                return { success: false, verified: false, error: 'Too many failed PIN attempts. Wait one minute and try again.' };
+            }
+            if (typeof pin !== 'string' || pin.length < 1 || pin.length > 128) {
+                recentFailures.push(now);
+                failedAdminPinAttempts.set(event.sender.id, recentFailures);
+                dbDao.addAuditLog('ADMIN_PIN_FAILED', session.user.username, `Invalid PIN input for ${scope}.`);
+                return { success: true, verified: false, error: 'Invalid Admin PIN/password.' };
+            }
+            const result = dbDao.verifyAdminPin(pin);
+            if (!result.verified || !result.adminUsername) {
+                recentFailures.push(now);
+                failedAdminPinAttempts.set(event.sender.id, recentFailures);
+                dbDao.addAuditLog('ADMIN_PIN_FAILED', session.user.username, `Incorrect PIN for ${scope}.`);
+                return { success: true, verified: false, error: 'Invalid Admin PIN/password.' };
+            }
+            failedAdminPinAttempts.delete(event.sender.id);
+            const grant = issueAdminOverride(event, sessionToken, scope, result.adminUsername);
+            dbDao.addAuditLog('ADMIN_OVERRIDE_GRANTED', result.adminUsername, `Granted ${scope} authorization for employee ${session.user.username}.`);
+            return { success: true, verified: true, grant };
+        } catch (err: any) {
+            return { success: false, verified: false, error: err.message };
+        }
+    });
     ipcMain.handle('auth:changePin', (event, _username: string, currentPin: string, newPin: string, sessionToken: string) => {
         try {
             const session = requireSession(event, sessionToken);
@@ -416,12 +497,12 @@ function setupIpcHandlers() {
             return changed ? { success: true } : { success: false, error: 'Current PIN/password is incorrect.' };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
-    ipcMain.handle('auth:addCashier', (event, _actor: string, managerPin: string, username: string, pin: string, sessionToken: string) => {
+    ipcMain.handle('auth:addCashier', (event, _actor: string, managerPin: string, username: string, displayName: string, pin: string, sessionToken: string) => {
         try {
             const session = requireSession(event, sessionToken, MANAGER_ROLES);
             const manager = dbDao.authenticateUser(session.user.username, managerPin);
             if (!manager || !MANAGER_ROLES.includes(manager.role)) throw new Error('Manager verification failed.');
-            dbDao.addCashier(username, pin, manager.username);
+            dbDao.addCashier(username, pin, manager.username, displayName);
             return { success: true };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
@@ -430,47 +511,42 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:getProducts', async (event, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/catalog`, { signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { products?: Product[] };
-                    if (response.ok && remote.products) return { success: true, data: remote.products };
-                } catch { /* Keep the local catalog available while disconnected. */ }
-            }
             return { success: true, data: dbDao.getProducts() };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
-    ipcMain.handle('pos:addProduct', async (event, product: Omit<Product, 'id'>, sessionToken: string) => {
+    ipcMain.handle('pos:addProduct', async (event, product: Omit<Product, 'id'>, authorizationToken: string, sessionToken: string) => {
         try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
-            if (!product || typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120 || typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80 || !Number.isFinite(product.price) || product.price <= 0 || !Number.isInteger(product.stock) || product.stock < 0 || (product.variant != null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Enter a valid item name, category, price, stock, and optional variant.');
+            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:add');
+            if (!product || typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120 || typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80 || !Number.isFinite(product.price) || product.price <= 0 || (product.cost_price != null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || !Number.isInteger(product.stock) || product.stock < 0 || (product.variant != null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Enter a valid item name, category, price, stock, cost, and optional variant.');
             const newProd = dbDao.addProduct(product);
+            dbDao.addAuditLog('MENU_ITEM_CREATED', grant.adminUsername, `Menu item ${newProd.name} created by ${session.user.username} with stock ${newProd.stock}.`);
             return { success: true, data: newProd };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
-    ipcMain.handle('pos:updateProduct', async (event, id: number, product: Partial<Product>, sessionToken: string) => {
+    ipcMain.handle('pos:updateProduct', async (event, id: number, product: Partial<Product>, authorizationToken: string, sessionToken: string) => {
         try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
-            if (!Number.isInteger(id) || id < 1 || !product || (product.name !== undefined && (typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120)) || (product.category !== undefined && (typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80)) || (product.price !== undefined && (!Number.isFinite(product.price) || product.price <= 0)) || (product.stock !== undefined && (!Number.isInteger(product.stock) || product.stock < 0)) || (product.variant !== undefined && product.variant !== null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Invalid menu item update.');
+            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:update');
+            if (!Number.isInteger(id) || id < 1 || !product || (product.name !== undefined && (typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120)) || (product.category !== undefined && (typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80)) || (product.price !== undefined && (!Number.isFinite(product.price) || product.price <= 0)) || (product.cost_price !== undefined && product.cost_price !== null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || (product.stock !== undefined && (!Number.isInteger(product.stock) || product.stock < 0)) || (product.variant !== undefined && product.variant !== null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Invalid menu item update.');
             dbDao.updateProduct(id, product);
+            dbDao.addAuditLog('MENU_ITEM_UPDATED', grant.adminUsername, `Menu item #${id} updated by ${session.user.username}: ${Object.keys(product).join(', ') || 'no fields changed'}.`);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
-    ipcMain.handle('pos:deleteProduct', async (event, id: number, sessionToken: string) => {
+    ipcMain.handle('pos:deleteProduct', async (event, id: number, authorizationToken: string, sessionToken: string) => {
         try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
+            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:delete');
             if (!Number.isInteger(id) || id < 1) throw new Error('Invalid menu item ID.');
             dbDao.deleteProduct(id);
+            dbDao.addAuditLog('MENU_ITEM_DELETED', grant.adminUsername, `Menu item #${id} deleted by ${session.user.username}.`);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
@@ -481,21 +557,13 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:getTables', async (event, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/catalog`, { signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { tables?: CafeTable[] };
-                    if (response.ok && remote.tables) return { success: true, data: remote.tables };
-                } catch { /* Keep local tables available while disconnected. */ }
-            }
             return { success: true, data: dbDao.getTables() };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
-    ipcMain.handle('pos:setTableCount', (event, count: number, actor: string, sessionToken: string) => {
+    ipcMain.handle('pos:setTableCount', (event, count: number, _actor: string, sessionToken: string) => {
         try {
             const session = requireSession(event, sessionToken, MANAGER_ROLES);
             if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error('Invalid table count request.');
@@ -506,14 +574,7 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:updateTableStatus', async (event, tableId: number, status: 'available' | 'occupied', sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
             if (!Number.isInteger(tableId) || tableId < 1 || !['available', 'occupied'].includes(status)) throw new Error('Invalid table update.');
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/table-status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_id: tableId, status }), signal: AbortSignal.timeout(1800) });
-                    if (response.ok) return { success: true };
-                } catch { /* Apply table changes locally while disconnected. */ }
-            }
             dbDao.updateTableStatus(tableId, status);
             return { success: true };
         } catch (err: any) {
@@ -525,9 +586,9 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:createOrder', async (event, sessionToken: string, orderData: {
         table_id: number | null;
         type: 'dine-in' | 'takeaway' | 'walk-in';
-        counter_name?: string;
-        terminal_id?: string;
         operator?: string;
+        cashier_id?: string;
+        server_name?: string;
         items_json: string;
         total_amount: number;
     }) => {
@@ -535,7 +596,8 @@ function setupIpcHandlers() {
             const session = requireSession(event, sessionToken);
             if (!orderData || !['dine-in', 'takeaway', 'walk-in'].includes(orderData.type)) throw new Error('Invalid order type.');
             if (orderData.operator !== undefined && (typeof orderData.operator !== 'string' || orderData.operator.length > 80)) throw new Error('Invalid operator.');
-            if (orderData.terminal_id !== undefined && (typeof orderData.terminal_id !== 'string' || !/^[A-Za-z0-9-]{3,40}$/.test(orderData.terminal_id))) throw new Error('Invalid terminal ID.');
+            if (orderData.cashier_id !== undefined && (typeof orderData.cashier_id !== 'string' || orderData.cashier_id.length > 32)) throw new Error('Invalid cashier identity.');
+            if (orderData.server_name !== undefined && (typeof orderData.server_name !== 'string' || orderData.server_name.trim().length > 80)) throw new Error('Invalid waiter/server name.');
             if (orderData.type === 'dine-in' && (!Number.isInteger(orderData.table_id) || (orderData.table_id ?? 0) < 1)) throw new Error('A valid table is required for dine-in.');
             if (typeof orderData.items_json !== 'string' || orderData.items_json.length > 100000) throw new Error('Invalid receipt items.');
             const items = JSON.parse(orderData.items_json) as Array<{ id: number; name: string; variant?: string | null; price: number; quantity: number }>;
@@ -543,27 +605,8 @@ function setupIpcHandlers() {
             if (!Number.isFinite(orderData.total_amount) || orderData.total_amount < 0 || orderData.total_amount > 10000000) throw new Error('Invalid order total.');
             const settings = dbDao.getSettings();
             const orderUuid = randomUUID();
-            const persistedOrderData = { ...orderData, order_uuid: orderUuid, operator: session.user.displayName, terminal_id: settings.terminal_id, counter_name: settings.counter_name };
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary' && settings.lan_primary_ip && settings.lan_primary_port) {
-                try {
-                    const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), 1800);
-                    let response: Response | null = null;
-                    try {
-                        response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(persistedOrderData), signal: controller.signal });
-                    } catch (error) {
-                        console.warn('[LAN Sync] Primary unavailable; recording sale in this laptop database.', error);
-                    } finally { clearTimeout(timeout); }
-                    if (response) {
-                        const remote = await response.json() as { success?: boolean; order?: Order; error?: string };
-                        if (response.ok && remote.success && remote.order) {
-                            if (settings.print_receipt_on_checkout === 'true') printReceipt(remote.order, settings).catch(err => console.error('[Printer] Auto-print error:', err));
-                            return { success: true, data: remote.order };
-                        }
-                        if (response.status < 500) return { success: false, error: remote.error || 'Primary counter rejected the sale.' };
-                    }
-                } catch (error) { console.warn('[LAN Sync] Primary response unavailable; recording sale locally.', error); }
-            }
+            const serverName = orderData.server_name?.trim() || session.user.displayName || session.user.username;
+            const persistedOrderData = { ...orderData, order_uuid: orderUuid, cashier_id: session.user.username, operator: session.user.displayName, server_name: serverName };
             const order = dbDao.createOrder(persistedOrderData);
 
             // Hardware ESC/POS printing in background if enabled
@@ -580,20 +623,22 @@ function setupIpcHandlers() {
         }
     });
 
-    ipcMain.handle('pos:voidOrder', async (event, orderId: number, _actor: string, reason: string, sessionToken: string) => {
+    ipcMain.handle('pos:voidOrder', async (event, orderId: number, reason: string, authorizationToken: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'order:void');
             if (!Number.isInteger(orderId) || orderId < 1 || typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 300) throw new Error('A valid receipt and void reason are required.');
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary' && settings.lan_primary_ip && settings.lan_primary_port) {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order_id: orderId, actor: session.user.username, reason: reason.trim() }), signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { success?: boolean; error?: string };
-                    if (response.ok && remote.success) return { success: true };
-                    if (response.status < 500) return { success: false, error: remote.error || 'Primary counter rejected the void.' };
-                } catch { /* Void the local receipt if the primary cannot be reached. */ }
-            }
-            dbDao.voidOrder(orderId, session.user.username, reason.trim());
+            dbDao.voidOrder(orderId, grant.adminUsername, reason.trim());
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('pos:discardOrderDraft', (event, tokenNo: number, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'order:void');
+            if (!Number.isInteger(tokenNo) || tokenNo < 1) throw new Error('Invalid order preview token.');
+            dbDao.addAuditLog('DRAFT_ORDER_DISCARDED', grant.adminUsername, `Unsaved order draft preview #${tokenNo} discarded for employee ${session.user.username}; inventory was unchanged.`);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
@@ -603,14 +648,6 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:getTodayOrders', async (event, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/orders?today=1`, { signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { orders?: Order[] };
-                    if (response.ok && remote.orders) return { success: true, data: remote.orders };
-                } catch { /* Use this laptop's order history while disconnected. */ }
-            }
             return { success: true, data: dbDao.getTodayOrders() };
         }
         catch (err: any) { return { success: false, error: err.message }; }
@@ -623,48 +660,55 @@ function setupIpcHandlers() {
             if (!validDate(startDate) || !validDate(endDate) || startDate > endDate) throw new Error('Choose a valid start and end date.');
             const span = (Date.parse(endDate + 'T00:00:00Z') - Date.parse(startDate + 'T00:00:00Z')) / 86400000;
             if (span > 366) throw new Error('Date ranges are limited to one year.');
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const peer = getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port);
-                    const response = await fetch(`http://${peer.ip}:${peer.port}/api/sync/analytics?start=${startDate}&end=${endDate}`, { signal: AbortSignal.timeout(2500) });
-                    const report = await response.json() as AnalyticsReport;
-                    if (response.ok && report.orders && report.stats) return { success: true, data: report };
-                } catch { /* Use local historical data while disconnected. */ }
-            }
-            return { success: true, data: { orders: dbDao.getOrdersBetween(startDate, endDate), stats: dbDao.getPosStats(startDate, endDate) } as AnalyticsReport };
+            const employeeMetrics = dbDao.getEmployeeMetrics(startDate, endDate);
+            return {
+                success: true,
+                data: {
+                    orders: dbDao.getOrdersBetween(startDate, endDate),
+                    stats: dbDao.getPosStats(startDate, endDate),
+                    employeeMetrics,
+                    grossProfit: dbDao.getGrossProfit(startDate, endDate),
+                } as AnalyticsReport
+            };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:getEmployeeMetrics', async (event, startDate: string, endDate: string, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken, MANAGER_ROLES);
+            return { success: true, data: dbDao.getEmployeeMetrics(startDate, endDate) };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
 
     ipcMain.handle('pos:getRecentOrders', async (event, limit: number | undefined, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/orders?limit=${boundedLimit(limit)}`, { signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { orders?: Order[] };
-                    if (response.ok && remote.orders) return { success: true, data: remote.orders };
-                } catch { /* Keep locally saved receipts accessible while disconnected. */ }
-            }
             return { success: true, data: dbDao.getRecentOrders(boundedLimit(limit)) };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
+    ipcMain.handle('pos:getKitchenQueue', (event, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken);
+            return { success: true, data: dbDao.getKitchenQueue() };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:updateKitchenStatus', (event, orderId: number, status: 'pending' | 'cooking' | 'ready', sessionToken: string) => {
+        try {
+            const session = requireSession(event, sessionToken);
+            if (!Number.isInteger(orderId) || orderId < 1 || !['cooking', 'ready'].includes(status)) throw new Error('Invalid kitchen queue update.');
+            dbDao.updateKitchenOrderStatus(orderId, status, session.user.username);
+            return { success: true };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
     // Stats
     ipcMain.handle('pos:getStats', async (event, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
-            const settings = dbDao.getSettings();
-            if (settings.p2p_sync === 'true' && settings.lan_mode === 'secondary') {
-                try {
-                    const response = await fetch(`http://${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).ip}:${getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port).port}/api/sync/catalog`, { signal: AbortSignal.timeout(1800) });
-                    const remote = await response.json() as { stats?: ReturnType<typeof dbDao.getPosStats> };
-                    if (response.ok && remote.stats) return { success: true, data: remote.stats };
-                } catch { /* Report this terminal's local totals when disconnected. */ }
-            }
             return { success: true, data: dbDao.getPosStats() };
         } catch (err: any) {
             return { success: false, error: err.message };
@@ -690,35 +734,25 @@ function setupIpcHandlers() {
 
     ipcMain.handle('pos:updateSetting', async (event, key: string, value: string, _actor: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
-            const allowedKeys = ['p2p_sync', 'font_scale', 'cafe_name', 'cafe_address', 'phone', 'currency', 'tax_rate', 'counter_name', 'print_receipt_on_checkout', 'printer_interface', 'printer_ip', 'printer_port', 'lan_mode', 'lan_primary_ip', 'lan_primary_port'];
+            const session = key === 'theme' ? requireSession(event, sessionToken) : requireSession(event, sessionToken, MANAGER_ROLES);
+            const allowedKeys = ['theme', 'font_scale', 'cafe_name', 'cafe_address', 'phone', 'currency', 'tax_rate', 'print_receipt_on_checkout', 'printer_interface', 'printer_ip', 'printer_port'];
             if (!allowedKeys.includes(key) || typeof value !== 'string' || value.length > 300) throw new Error('Invalid setting.');
+            if (key === 'theme' && !['light', 'dark'].includes(value)) throw new Error('Invalid theme setting.');
             const normalizedValue = key === 'printer_interface'
                 ? (['network', 'pos-80 printer (usb/network)', 'pos-80 printer', 'usb/network'].includes(value.trim().toLowerCase()) ? 'network' : 'none')
                 : value;
             if (key === 'tax_rate' && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100)) throw new Error('Tax rate must be between 0 and 100.');
             if (key === 'font_scale' && (!Number.isFinite(Number(value)) || Number(value) < 0.85 || Number(value) > 1.35)) throw new Error('Font scale must be between 0.85 and 1.35.');
-            if (key === 'p2p_sync' && !['true', 'false'].includes(value)) throw new Error('Invalid P2P sync setting.');
-            if (key === 'lan_mode' && !['primary', 'secondary'].includes(value)) throw new Error('Invalid counter role.');
             if (key === 'print_receipt_on_checkout' && !['true', 'false'].includes(value)) throw new Error('Invalid auto-print setting.');
             if (key === 'printer_interface' && !['none', 'network'].includes(normalizedValue)) throw new Error('Invalid printer interface.');
-            if (['printer_port', 'lan_primary_port'].includes(key) && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) throw new Error('Port must be between 1 and 65535.');
-            if (['printer_ip', 'lan_primary_ip'].includes(key) && isIP(value) === 0) throw new Error('Enter a valid IPv4 or IPv6 address.');
-            if (['cafe_name', 'currency', 'counter_name'].includes(key) && !value.trim()) throw new Error('This setting cannot be blank.');
+            if (key === 'printer_port' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) throw new Error('Port must be between 1 and 65535.');
+            if (key === 'printer_ip' && isIP(value) === 0) throw new Error('Enter a valid printer IP address.');
+            if (['cafe_name', 'currency'].includes(key) && !value.trim()) throw new Error('This setting cannot be blank.');
             dbDao.updateSetting(key, normalizedValue, session.user.username);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
-    });
-
-    ipcMain.handle('pos:configureP2p', async (event, sessionToken: string) => {
-        try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
-            const settings = dbDao.getSettings();
-            await configureLanSync(settings.p2p_sync === 'true', settings.lan_mode, Number(settings.lan_primary_port || 49200));
-            return { success: true, data: getLanStatus() };
-        } catch (err: any) { return { success: false, error: err.message }; }
     });
 
     // Thermal Printing
@@ -733,25 +767,15 @@ function setupIpcHandlers() {
         }
     });
 
-    // LAN Status & Sync
-    ipcMain.handle("pos:getLanStatus", async (event, sessionToken: string) => {
+    ipcMain.handle('pos:printChefToken', async (event, order: Order, sessionToken: string) => {
         try {
             requireSession(event, sessionToken);
             const settings = dbDao.getSettings();
-            if (settings.p2p_sync === "true" && settings.lan_mode === "secondary") {
-                const peer = getPrimaryAddress(settings.lan_primary_ip, settings.lan_primary_port);
-                await checkPrimaryConnection(peer.ip, peer.port);
-            }
-            return { success: true, data: getLanStatus() };
-        } catch (err) { return { success: false, error: err instanceof Error ? err.message : "Could not load network status." }; }
-    });
-
-    ipcMain.handle("pos:testLanConnection", async (event, ip: string, port: string, sessionToken: string) => {
-        try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
-            if (dbDao.getSettings().p2p_sync !== "true" || typeof ip !== "string" || isIP(ip.trim()) === 0 || !isValidPort(port)) return { success: false, connected: false };
-            return { success: true, connected: await checkPrimaryConnection(ip.trim(), port) };
-        } catch { return { success: false, connected: false }; }
+            const result = await printChefToken(order, settings);
+            return result;
+        } catch (err: any) {
+            return { success: false, message: err.message };
+        }
     });
 
     // Audit Logs

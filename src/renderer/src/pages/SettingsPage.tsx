@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { PosSettings, LanStatus, Order, AuditLog } from '../../../types/pos';
+import React, { useState, useEffect, useRef } from 'react';
+import { PosSettings, Order, AuditLog } from '../../../types/pos';
 import { AuthSession } from '../../../types/auth';
 import { PosLoader } from '../components/PosLoader';
 import { PosToast } from '../components/PosToast';
+import { AdminPinModal } from '../components/AdminPinModal';
 import {
-    Settings, Store, Laptop, Printer, Network,
-    Save, Check, AlertCircle, RefreshCw, TestTube, ShieldCheck, FileSpreadsheet, TriangleAlert, Database, Download, Upload
+    Settings, Store, Printer,
+    Save, Check, RefreshCw, ShieldCheck, FileSpreadsheet, TriangleAlert, Database, Download, Upload
 } from 'lucide-react';
 
 const clampFontScale = (value: string | number): number => Math.max(0.85, Math.min(1.35, Number.isFinite(Number(value)) ? Number(value) : 1));
@@ -28,44 +29,37 @@ interface Props {
 
 export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFontScaleChanged }) => {
     const [formData, setFormData] = useState<PosSettings>({
+        theme: 'light',
         cafe_name: '',
         cafe_address: '',
         phone: '',
         currency: 'Rs.',
         tax_rate: '0',
-        counter_name: 'Counter 1 - Main Laptop',
         print_receipt_on_checkout: 'true',
         printer_interface: 'none',
-        p2p_sync: 'false',
         font_scale: '1',
-        terminal_id: 'UNASSIGNED',
         printer_ip: '192.168.1.200',
         printer_port: '9100',
-        lan_mode: 'primary',
-        lan_primary_ip: '127.0.0.1',
-        lan_primary_port: '49200',
     });
 
-    const [lanStatus, setLanStatus] = useState<LanStatus | null>(null);
     const [saving, setSaving] = useState(false);
     const [restartRequested, setRestartRequested] = useState(false);
     const [loadingSettings, setLoadingSettings] = useState(true);
     const [tableBusy, setTableBusy] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
-    const [testLanResult, setTestLanResult] = useState<string | null>(null);
     const [testPrintResult, setTestPrintResult] = useState<string | null>(null);
-    const [checkingNetwork, setCheckingNetwork] = useState(false);
     const [testingPrinter, setTestingPrinter] = useState(false);
     const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
     const [savedFontScale, setSavedFontScale] = useState(1);
     const [tableCount, setTableCount] = useState(10);
     const [tableCountMessage, setTableCountMessage] = useState('');
-    const [activePane, setActivePane] = useState<'profile' | 'printer' | 'security' | 'network' | 'audit' | 'data'>('profile');
+    const [activePane, setActivePane] = useState<'profile' | 'printer' | 'security' | 'audit' | 'data'>('profile');
     const [currentPin, setCurrentPin] = useState('');
     const [newPin, setNewPin] = useState('');
     const [confirmPin, setConfirmPin] = useState('');
     const [credentialMessage, setCredentialMessage] = useState('');
     const [cashierUsername, setCashierUsername] = useState('');
+    const [cashierDisplayName, setCashierDisplayName] = useState('');
     const [cashierPin, setCashierPin] = useState('');
     const [managerPin, setManagerPin] = useState('');
     const [shiftDialogOpen, setShiftDialogOpen] = useState(false);
@@ -77,14 +71,20 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
     const [resetConfirmation, setResetConfirmation] = useState('');
     const [backupNotice, setBackupNotice] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+    const [adminPinOpen, setAdminPinOpen] = useState(false);
+    const pendingAdminAction = useRef<(() => void) | null>(null);
+
+    const requireAdminPin = (action: () => void) => {
+        pendingAdminAction.current = action;
+        setAdminPinOpen(true);
+    };
 
     const loadSettings = async () => {
         setLoadingSettings(true);
         try {
             if (window.api) {
-                const [settingsRes, lanRes, auditRes, tablesRes] = await Promise.all([
+                const [settingsRes, auditRes, tablesRes] = await Promise.all([
                     window.api.getSettings(session.sessionToken),
-                    window.api.getLanStatus(session.sessionToken),
                     window.api.getAuditLogs(50, session.sessionToken),
                     window.api.getTables(session.sessionToken),
                 ]);
@@ -94,9 +94,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                     const normalized = { ...settingsRes.data, printer_interface, font_scale: settingsRes.data.font_scale || '1' };
                     setFormData(normalized);
                     setSavedFontScale(clampFontScale(normalized.font_scale));
-                }
-                if (lanRes.success && lanRes.data) {
-                    setLanStatus(lanRes.data);
                 }
                 if (auditRes.success && auditRes.data) {
                     setAuditLogs(auditRes.data);
@@ -112,8 +109,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         loadSettings();
     }, []);
 
-    const handleSave = async (e?: React.FormEvent) => {
-        e?.preventDefault();
+    const saveSettings = async () => {
         setSaving(true);
         setSaveSuccess(false);
 
@@ -121,14 +117,11 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
             if (window.api) {
                 const settingsToSave = { ...formData, printer_interface: formData.printer_interface === 'network' ? 'network' : 'none' };
                 for (const [key, value] of Object.entries(settingsToSave)) {
-                    if (key === 'terminal_id') continue;
                     const result = await window.api.updateSetting(key, String(value), session.user.username, session.sessionToken);
                     if (!result.success) throw new Error(result.error || `Could not save ${key}.`);
                 }
                 const fontScale = clampFontScale(settingsToSave.font_scale);
                 const fontChanged = fontScale !== savedFontScale;
-                const networkResult = await window.api.configureP2p(session.sessionToken);
-                if (!networkResult.success) throw new Error(networkResult.error || 'Could not apply network mode.');
                 await loadSettings();
                 if (fontChanged) onFontScaleChanged?.();
             }
@@ -145,7 +138,16 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         }
     };
 
-    const resizeTables = async (delta: -1 | 1) => {
+    const handleSave = (e?: React.FormEvent) => {
+        e?.preventDefault();
+        requireAdminPin(() => { void saveSettings(); });
+    };
+
+    const resizeTables = (delta: -1 | 1) => {
+        requireAdminPin(() => { void performResizeTables(delta); });
+    };
+
+    const performResizeTables = async (delta: -1 | 1) => {
         setTableCountMessage(''); setTableBusy(true);
         try {
             if (!window.api) throw new Error('Table management requires the desktop app.');
@@ -221,30 +223,9 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
     const handleAddCashier = async (event: React.FormEvent) => {
         event.preventDefault(); setCredentialMessage('');
         if (!window.api) { setCredentialMessage('Cashier setup requires the desktop application.'); return; }
-        const result = await window.api.addCashier(session.user.username, managerPin, cashierUsername, cashierPin, session.sessionToken);
+        const result = await window.api.addCashier(session.user.username, managerPin, cashierUsername, cashierDisplayName, cashierPin, session.sessionToken);
         setCredentialMessage(result.success ? 'Cashier account created.' : result.error || 'Could not create cashier.');
-        if (result.success) { setManagerPin(''); setCashierPin(''); setCashierUsername(''); }
-    };
-
-    const handleTestLanConnection = async () => {
-        setCheckingNetwork(true);
-        if (formData.p2p_sync !== 'true') { setTestLanResult('Enable P2P Network Sync and save settings before testing.'); setCheckingNetwork(false); return; }
-        setTestLanResult('Checking connection to Primary Laptop...');
-        if (window.api) {
-            try {
-                const res = await window.api.testLanConnection(formData.lan_primary_ip, formData.lan_primary_port, session.sessionToken);
-                if (res.connected) {
-                    setTestLanResult('✓ Success: Connected to Primary Laptop DB Server!');
-                } else {
-                    setTestLanResult('✗ Failed: Could not reach Primary Laptop. Verify IP and local Wi-Fi / LAN.');
-                }
-            } catch (err: any) {
-                setTestLanResult('Could not check the other counter. Verify its address and local network, then retry.');
-            }
-        } else {
-            setTestLanResult('Connection checks are available in the installed desktop app.');
-        }
-        setCheckingNetwork(false);
+        if (result.success) { setManagerPin(''); setCashierPin(''); setCashierUsername(''); setCashierDisplayName(''); }
     };
 
     const handleTestPrinter = async () => {
@@ -256,7 +237,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
             table_id: null,
             table_no: null,
             type: 'walk-in',
-            counter_name: formData.counter_name,
             items_json: JSON.stringify([{ id: 1, name: 'Karak Chai (Test)', price: 80, quantity: 1, subtotal: 80 }]),
             total_amount: 80,
             created_at: new Date().toISOString(),
@@ -276,10 +256,10 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
     };
 
     return (
-        <div className="h-full min-h-0 w-full min-w-0 flex-1 flex flex-col overflow-hidden bg-[#FDFBF7] select-none font-sans">
-            {(loadingSettings || saving || tableBusy || checkingNetwork || testingPrinter || backupBusy) && <PosLoader overlay message={tableBusy ? 'Updating local floor tables...' : checkingNetwork ? 'Checking local network...' : testingPrinter ? 'Sending printer check...' : backupBusy ? 'Preparing local database...' : saving ? 'Saving local settings...' : 'Loading local settings...'} />}
+        <div className="h-full min-h-0 w-full min-w-0 flex-1 flex flex-col overflow-hidden bg-[#FDFBF7] dark:bg-slate-950 select-none font-sans">
+            {(loadingSettings || saving || tableBusy || testingPrinter || backupBusy) && <PosLoader overlay message={tableBusy ? 'Updating local floor tables...' : testingPrinter ? 'Sending printer check...' : backupBusy ? 'Preparing local database...' : saving ? 'Saving local settings...' : 'Loading local settings...'} />}
             {shiftDialogOpen && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-coffee-950/60 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !handoverBusy) setShiftDialogOpen(false); }}>
-                <section role="dialog" aria-modal="true" aria-labelledby="shift-dialog-title" className="w-full max-w-lg rounded-3xl border border-cream-200 bg-[#FDFBF7] p-6 shadow-2xl">
+                <section role="dialog" aria-modal="true" aria-labelledby="shift-dialog-title" className="w-full max-w-lg rounded-3xl border border-cream-200 dark:border-slate-700 bg-[#FDFBF7] dark:bg-slate-900 p-6 shadow-2xl">
                     <h2 id="shift-dialog-title" className="text-xl font-black text-coffee-900">{shiftSummary ? 'Shift closed' : 'Confirm shift handover'}</h2>
                     {shiftSummary ? <div className="mt-4 space-y-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950"><p><strong>Orders processed:</strong> {shiftSummary.orders}</p><p><strong>Net shift revenue:</strong> {formData.currency} {shiftSummary.revenue.toLocaleString()}</p><p><strong>Closed:</strong> {new Date(shiftSummary.closedAt).toLocaleString('en-PK')}</p><p className="pt-2 font-extrabold">The next order will receive Token #001.</p></div> : <p className="mt-2 text-sm leading-relaxed text-coffee-600">This records the current shift summary and starts a new token sequence. Existing receipts remain saved and searchable.</p>}
                     {shiftError && <p role="alert" className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">{shiftError}</p>}
@@ -288,7 +268,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
             </div>}
             {backupNotice && <PosToast message={backupNotice.message} tone={backupNotice.tone} onDismiss={() => setBackupNotice(null)} />}
             {resetConfirmOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-coffee-950/70 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !backupBusy) { setResetConfirmOpen(false); setResetConfirmation(''); } }}>
-                <section role="alertdialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" className="w-full max-w-lg rounded-3xl border border-red-200 bg-[#FDFBF7] p-6 shadow-2xl">
+                <section role="alertdialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" className="w-full max-w-lg rounded-3xl border border-red-200 dark:border-red-900 bg-[#FDFBF7] dark:bg-slate-900 p-6 shadow-2xl">
                     <div className="flex items-start gap-3"><div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700"><TriangleAlert className="h-5 w-5" /></div><div><h2 id="reset-dialog-title" className="text-xl font-black text-coffee-900">Reset this POS terminal?</h2><p id="reset-dialog-description" className="mt-2 text-sm leading-relaxed text-coffee-600">All live records on this laptop will be cleared, including receipts, menu items, settings, tables, and staff accounts. Before resetting, CafePOS creates and verifies a complete recovery file in its private <strong>backups</strong> folder. You can restore that file later from Data &amp; Backup.</p></div></div>
                     <label className="mt-5 block text-xs font-extrabold text-coffee-700" htmlFor="reset-confirmation">Type RESET to continue</label>
                     <input id="reset-confirmation" autoComplete="off" value={resetConfirmation} onChange={event => setResetConfirmation(event.target.value)} className="cafe-input mt-2" placeholder="RESET" />
@@ -296,7 +276,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                 </section>
             </div>}
             {restoreConfirmOpen && <div className="fixed inset-0 z-[110] flex items-center justify-center bg-coffee-950/60 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRestoreConfirmOpen(false); }}>
-                <section role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title" className="w-full max-w-md rounded-3xl border border-cream-200 bg-[#FDFBF7] p-6 shadow-2xl">
+                <section role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title" className="w-full max-w-md rounded-3xl border border-cream-200 dark:border-slate-700 bg-[#FDFBF7] dark:bg-slate-900 p-6 shadow-2xl">
                     <h2 id="restore-dialog-title" className="text-xl font-black text-coffee-900">Restore database backup?</h2>
                     <p className="mt-2 text-sm leading-relaxed text-coffee-600">The selected backup will replace the POS database on this laptop. The current database is kept temporarily so it can be recovered if restore fails.</p>
                     <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setRestoreConfirmOpen(false)} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">Cancel</button><button type="button" onClick={() => void handleRestoreBackup()} className="min-h-11 rounded-xl bg-coffee-700 px-4 text-sm font-extrabold text-white hover:bg-coffee-800">Choose Backup & Restore</button></div>
@@ -309,7 +289,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                         ['profile', 'General Profile', Store],
                         ['printer', 'Printer & Hardware', Printer],
                         ['security', 'Security & Access', ShieldCheck],
-                        ['network', 'Network & P2P Sync', Network],
                         ['audit', 'Audit Logs', FileSpreadsheet],
                         ['data', 'Data & Backup', Database],
                     ].map(([key, label, Icon]) => { const active = activePane === key; const PaneIcon = Icon as React.ComponentType<{ className?: string }>; return <button key={key as string} type="button" onClick={() => setActivePane(key as typeof activePane)} aria-current={active ? 'page' : undefined} className={`mb-1 flex min-h-11 2xl:min-h-12 shrink-0 md:w-full items-center gap-3 2xl:gap-4 rounded-xl px-3 2xl:px-4 text-left text-xs 2xl:text-sm font-bold transition-colors ${active ? 'bg-coffee-700 text-white shadow-warm' : 'text-coffee-600 hover:bg-cream-100'}`}><PaneIcon className="h-4 w-4 2xl:h-5 2xl:w-5 shrink-0" /><span>{label as string}</span></button>; })}
@@ -333,7 +312,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                             </div>
                             <div>
                                 <h1 className="text-lg font-black text-coffee-800 tracking-tight">Settings</h1>
-                                <p className="text-xs text-coffee-400 mt-0.5">Manage cafe profile, devices, access and network</p>
+                                <p className="text-xs text-coffee-400 mt-0.5">Manage cafe profile, local devices and access</p>
                             </div>
                         </div>
 
@@ -538,48 +517,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                                 </div>
                             </div>
 
-                            {/* ── Card 2: Laptop Counter Identity ────────────────────────────── */}
-                            <div className="flex min-w-0 flex-col gap-5 bg-white p-6 rounded-3xl border border-cream-200 shadow-warm-sm">
-                                <div className="flex items-center gap-3 pb-3 border-b border-cream-200">
-                                    <Laptop className="w-5 h-5 text-coffee-600" />
-                                    <h2 className="text-lg font-black text-coffee-800">Laptop Counter Identification</h2>
-                                </div>
-
-                                <div className="flex flex-1 flex-col gap-4 text-sm">
-                                    <div>
-                                        <label className="block text-xs font-bold uppercase tracking-wider text-coffee-600 mb-1.5">
-                                            Current Laptop Counter Name
-                                        </label>
-                                        <select
-                                            value={formData.counter_name}
-                                            onChange={(e) => setFormData({ ...formData, counter_name: e.target.value })}
-                                            className="cafe-input font-bold text-coffee-800"
-                                        >
-                                            <option value="Counter 1 - Main Laptop">Counter 1 - Main Laptop (Primary Counter)</option>
-                                            <option value="Counter 2 - Express Laptop">Counter 2 - Express Laptop (Secondary Counter)</option>
-                                            <option value="Takeaway Counter">Takeaway Counter</option>
-                                            <option value="Garden Counter">Garden Counter</option>
-                                        </select>
-                                        <p className="text-xs text-coffee-400 mt-1.5 leading-relaxed">
-                                            Every order created on this machine will be tagged with this counter label. Combined live analytics automatically tracks and separates sales by counter.
-                                        </p>
-                                    </div>
-
-                                    <div className="p-4 bg-cream-50 rounded-2xl border border-cream-200">
-                                        <div className="flex items-center justify-between text-xs font-bold text-coffee-700 mb-1">
-                                            <span>Current Machine IP Address:</span>
-                                            <span className="font-mono text-coffee-900 bg-white px-2 py-0.5 rounded border border-cream-300">
-                                                {lanStatus?.localIp || '127.0.0.1'}
-                                            </span>
-                                        </div>
-                                        <p className="text-[11px] text-coffee-400">
-                                            Share this local IP with Laptop 2 when configuring two-laptop synchronization.
-                                        </p>
-                                    </div>
-                                    <GuideNote title="Counter naming" items={['Give every laptop its own counter name so analytics can separate sales.', 'Use the machine IP above when setting up the second laptop.', 'Press Save All Settings to apply changes.']} />
-                                </div>
-                            </div>
-
                         </>}
                         {activePane === 'security' && <>
                             {/* Secure local credentials */}
@@ -603,6 +540,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                                         <form onSubmit={handleAddCashier} className="grid grid-cols-1 gap-3">
                                             <p className="text-xs font-bold text-coffee-700">Create a cashier account (verify with manager PIN)</p>
                                             <input aria-label="New cashier username" required minLength={3} maxLength={32} value={cashierUsername} onChange={e => setCashierUsername(e.target.value)} className="cafe-input" placeholder="Cashier username" />
+                                            <input aria-label="Cashier display name" required maxLength={80} value={cashierDisplayName} onChange={e => setCashierDisplayName(e.target.value)} className="cafe-input" placeholder="Cashier / waiter display name" />
                                             <input aria-label="New cashier PIN or password" required minLength={6} maxLength={64} type="password" value={cashierPin} onChange={e => setCashierPin(e.target.value)} className="cafe-input" placeholder="Cashier PIN/password" />
                                             <input aria-label="Manager verification PIN" required type="password" value={managerPin} onChange={e => setManagerPin(e.target.value)} className="cafe-input" placeholder="Manager verification PIN" />
                                             <button className="rounded-xl bg-cream-100 border border-cream-300 text-coffee-700 font-bold text-sm px-4 py-2 hover:bg-cream-200">Add Cashier</button>
@@ -617,102 +555,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                                 <button type="button" onClick={() => { setShiftSummary(null); setShiftError(''); setShiftDialogOpen(true); }} className="min-h-11 self-start rounded-xl border border-amber-300 bg-amber-50 px-4 text-sm font-extrabold text-amber-900 hover:bg-amber-100">End Shift & Reset Token Sequence</button>
                             </section>}
 
-                        </>}
-                        {activePane === 'network' && <>
-                            {/* Peer-to-Peer Sync */}
-                            <section className="flex min-w-0 flex-col gap-4 bg-white p-6 rounded-3xl border border-cream-200 shadow-warm-sm" aria-labelledby="p2p-heading">
-                                <div className="flex items-center gap-3 pb-3 border-b border-cream-200"><Network className="w-5 h-5 text-coffee-600" /><div><h2 id="p2p-heading" className="text-lg font-black text-coffee-800">Network Operation</h2><p className="text-xs text-coffee-400">Isolated mode does not open sockets, discover peers, or poll the network.</p></div></div>
-                                <label htmlFor="p2p-sync-toggle" className="group flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-cream-200 bg-cream-50 p-4 transition-colors hover:bg-cream-100">
-                                    <span><span className="block font-bold text-coffee-800">Peer-to-Peer (P2P) Network Sync</span><span className="mt-1 block text-xs text-coffee-500">{formData.p2p_sync === 'true' ? 'Enabled: discover the primary counter and share live sales, inventory, and tables.' : 'Disabled: this terminal uses only its local SQLite database.'}</span></span>
-                                    <span className="relative inline-flex shrink-0 items-center">
-                                        <input id="p2p-sync-toggle" type="checkbox" role="switch" aria-checked={formData.p2p_sync === 'true'} checked={formData.p2p_sync === 'true'} onChange={e => setFormData({ ...formData, p2p_sync: e.target.checked ? 'true' : 'false' })} className="peer sr-only" />
-                                        <span aria-hidden="true" className={`h-7 w-12 rounded-full p-1 transition-colors duration-200 ${formData.p2p_sync === 'true' ? 'bg-coffee-700' : 'bg-cream-300'} peer-focus-visible:ring-2 peer-focus-visible:ring-coffee-500 peer-focus-visible:ring-offset-2`}>
-                                            <span className={`block h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 ${formData.p2p_sync === 'true' ? 'translate-x-5' : 'translate-x-0'}`} />
-                                        </span>
-                                        <span className="sr-only">{formData.p2p_sync === 'true' ? 'Sync enabled' : 'Sync disabled'}</span>
-                                    </span>
-                                </label>
-                                <p className="text-xs text-coffee-500">Terminal ID: <strong className="font-mono text-coffee-800">{formData.terminal_id}</strong></p>
-                                <GuideNote title="When to enable sync" items={['Leave it off if the cafe runs on a single laptop.', 'Turn it on to share live sales, inventory and tables between counters.', 'Both laptops need to be on the same network.']} />
-                            </section>
-
-                            {/* ── Card 4: Two-Laptop Offline LAN Synchronization ─────────────── */}
-                            <div className="flex min-w-0 flex-col gap-5 bg-white p-6 rounded-3xl border border-cream-200 shadow-warm-sm">
-                                <div className="flex items-center gap-3 pb-3 border-b border-cream-200">
-                                    <Network className="w-5 h-5 text-coffee-600" />
-                                    <h2 className="text-lg font-black text-coffee-800">Two-Laptop Offline LAN Sync</h2>
-                                </div>
-
-                                <div className="flex flex-1 flex-col gap-4 text-sm">
-                                    <div>
-                                        <label className="block text-xs font-bold uppercase tracking-wider text-coffee-600 mb-1.5">
-                                            This Laptop's Role
-                                        </label>
-                                        <select
-                                            value={formData.lan_mode}
-                                            onChange={(e) => setFormData({ ...formData, lan_mode: e.target.value as 'primary' | 'secondary' })}
-                                            className="cafe-input font-bold text-coffee-800"
-                                        >
-                                            <option value="primary">Primary Laptop (Master SQLite Database Server)</option>
-                                            <option value="secondary">Secondary Laptop (Counter Client)</option>
-                                        </select>
-                                    </div>
-
-                                    {formData.lan_mode === 'secondary' ? (
-                                        <>
-                                            <div className="grid grid-cols-2 gap-4">
-                                                <div>
-                                                    <label className="block text-xs font-bold uppercase tracking-wider text-coffee-600 mb-1.5">
-                                                        Primary Laptop IP
-                                                    </label>
-                                                    <input
-                                                        type="text"
-                                                        value={formData.lan_primary_ip}
-                                                        onChange={(e) => setFormData({ ...formData, lan_primary_ip: e.target.value })}
-                                                        placeholder="192.168.1.100"
-                                                        className="cafe-input font-mono"
-                                                    />
-                                                </div>
-
-                                                <div>
-                                                    <label className="block text-xs font-bold uppercase tracking-wider text-coffee-600 mb-1.5">
-                                                        Port
-                                                    </label>
-                                                    <input
-                                                        type="text"
-                                                        value={formData.lan_primary_port}
-                                                        onChange={(e) => setFormData({ ...formData, lan_primary_port: e.target.value })}
-                                                        placeholder="49200"
-                                                        className="cafe-input font-mono"
-                                                    />
-                                                </div>
-                                            </div>
-
-                                            <div className="pt-2">
-                                                <button
-                                                    type="button"
-                                                    onClick={handleTestLanConnection}
-                                                    disabled={formData.p2p_sync !== 'true'}
-                                                    className="px-4 py-2.5 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-800 text-xs font-bold transition-all active:scale-95 flex items-center gap-2"
-                                                >
-                                                    <TestTube className="w-4 h-4 text-blue-600" />
-                                                    <span>Test Connection to Primary Laptop</span>
-                                                </button>
-                                                {testLanResult && (
-                                                    <p className="text-xs font-bold mt-2 text-coffee-700">
-                                                        {testLanResult}
-                                                    </p>
-                                                )}
-                                            </div>
-                                        </>
-                                    ) : (
-                                        <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 text-xs text-emerald-900 leading-relaxed">
-                                            ✓ This laptop is operating as the <strong>Primary Master Database</strong>. The embedded LAN server runs automatically on port {formData.lan_primary_port || '49200'} to sync orders placed from Laptop 2 in real time.
-                                        </div>
-                                    )}
-                                    <GuideNote title="Two-laptop setup" items={['The primary laptop hosts the master database, so keep it on during service.', 'On the secondary laptop, enter the primary IP and port, then run Test Connection.', 'Find the primary IP under Printer & Hardware > Current Machine IP Address.']} />
-                                </div>
-                            </div>
                         </>}
                         {activePane === 'data' && <section className="col-span-full flex min-w-0 flex-col gap-5 rounded-3xl border border-cream-200 bg-white p-6 shadow-warm-sm" aria-labelledby="backup-heading">
                             <div className="flex items-start gap-3 border-b border-cream-200 pb-4"><Database className="mt-0.5 h-5 w-5 text-coffee-600" /><div><h2 id="backup-heading" className="text-lg font-black text-coffee-800">Data & Database Backup</h2><p className="mt-1 text-sm text-coffee-500">The live database stays in this Windows account’s private application data folder. Export a portable copy before moving to another laptop or reinstalling Windows.</p></div></div>
@@ -763,6 +605,20 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                     </div>
                 </div>
             </div>
+            <AdminPinModal
+                isOpen={adminPinOpen}
+                sessionToken={session.sessionToken}
+                scope="settings:write"
+                title="Settings Change Authorization"
+                description="Verify an Admin or Manager PIN before saving system settings or changing the floor layout."
+                actionLabel="Authorize Settings Change"
+                onSuccess={() => {
+                    const action = pendingAdminAction.current;
+                    pendingAdminAction.current = null;
+                    action?.();
+                }}
+                onClose={() => setAdminPinOpen(false)}
+            />
         </div>
     );
 };

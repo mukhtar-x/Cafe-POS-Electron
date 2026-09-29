@@ -3,77 +3,293 @@
 @tailwind utilities;
 
 /* ─── Base Reset & Typography ───────────────────────────────────────────── */
-*, *::before, *::after {
-  box-sizing: border-box;
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
 }
 
-html, body, #root {
-  height: 100%;
-  overflow: hidden;
+html,
+body,
+#root {
+    height: 100%;
+    overflow: hidden;
 }
 
 html {
-  --app-font-scale: 1;
-  font-size: clamp(13.6px, calc(16px * var(--app-font-scale)), 21.6px);
+    --app-font-scale: 1;
+    font-size: clamp(13.6px, calc(16px * var(--app-font-scale)), 21.6px);
 }
 
 body {
-  background-color: #FDFBF7;
-  color: #2C221E;
-  font-family: 'Inter', system-ui, sans-serif;
+    background-color: #FDFBF7;
+    color: #2C221E;
+    font-family: 'Inter', system-ui, sans-serif;
+    transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-/* ─── Custom Scrollbar — warm parchment tones ────────────────────────────── */
+html.dark body {
+    background-color: #0B0F17;
+    color: #F1F5F9;
+}
+
+/* ─── Custom Scrollbar — warm parchment tones (Light) & dark slate (Dark) ─── */
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+    width: 7px;
+    height: 7px;
 }
+
 ::-webkit-scrollbar-track {
-  background: #F5EDE0;
-  border-radius: 99px;
+    background: #F5EDE0;
+    border-radius: 99px;
 }
+
 ::-webkit-scrollbar-thumb {
-  background: #CEB49B;
-  border-radius: 99px;
+    background: #CEB49B;
+    border-radius: 99px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: #A8825E;
+    background: #A8825E;
+}
+
+html.dark ::-webkit-scrollbar-track {
+    background: #111827;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+    background: #374151;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+    background: #4B5563;
+}
+
+/* Apply the dark palette to page utilities that do not define their own dark variant. */
+html.dark [class~="bg-white"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-cream-50"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-cream-100"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-cream-50/"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-cream-100/"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-coffee-50"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-coffee-100"]:not([class*="dark:bg-"]) {
+    background-color: #111827;
+}
+
+html.dark [class~="bg-cream-200"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-cream-300"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-cream-400"]:not([class*="dark:bg-"]),
+html.dark [class~="bg-coffee-200"]:not([class*="dark:bg-"]) {
+    background-color: #1f2937;
+}
+
+html.dark [class~="text-coffee-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-coffee-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-coffee-700"]:not([class*="dark:text-"]) {
+    color: #f1f5f9;
+}
+
+html.dark [class~="text-coffee-600"]:not([class*="dark:text-"]),
+html.dark [class~="text-coffee-500"]:not([class*="dark:text-"]) {
+    color: #cbd5e1;
+}
+
+html.dark [class~="text-coffee-400"]:not([class*="dark:text-"]),
+html.dark [class~="text-coffee-300"]:not([class*="dark:text-"]) {
+    color: #94a3b8;
+}
+
+html.dark [class~="border-cream-100"]:not([class*="dark:border-"]),
+html.dark [class~="border-cream-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-cream-300"]:not([class*="dark:border-"]),
+html.dark [class~="border-cream-400"]:not([class*="dark:border-"]) {
+    border-color: #374151;
+}
+
+html.dark [class~="placeholder-coffee-300"]:not([class*="dark:placeholder-"])::placeholder {
+    color: #64748b;
+}
+
+html.dark [class*="bg-red-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-red-100"]:not([class*="dark:bg-"]) {
+    background-color: #3b1f28;
+}
+
+html.dark [class*="bg-amber-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-amber-100"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-amber-200"]:not([class*="dark:bg-"]) {
+    background-color: #3b2e18;
+}
+
+html.dark [class*="bg-blue-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-blue-100"]:not([class*="dark:bg-"]) {
+    background-color: #1e293b;
+}
+
+html.dark [class*="bg-emerald-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-emerald-100"]:not([class*="dark:bg-"]) {
+    background-color: #17352b;
+}
+
+html.dark [class*="bg-green-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-green-100"]:not([class*="dark:bg-"]) {
+    background-color: #17352b;
+}
+
+html.dark [class*="bg-gray-50"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-gray-100"]:not([class*="dark:bg-"]),
+html.dark [class*="bg-gray-200"]:not([class*="dark:bg-"]) {
+    background-color: #1f2937;
+}
+
+html.dark [class~="text-red-950"]:not([class*="dark:text-"]),
+html.dark [class~="text-red-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-red-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-red-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-red-600"]:not([class*="dark:text-"]) {
+    color: #fecaca;
+}
+
+html.dark [class~="text-amber-950"]:not([class*="dark:text-"]),
+html.dark [class~="text-amber-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-amber-800"]:not([class*="dark:text-"]) {
+    color: #fde68a;
+}
+
+html.dark [class~="text-amber-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-amber-600"]:not([class*="dark:text-"]) {
+    color: #fcd34d;
+}
+
+html.dark [class~="text-blue-950"]:not([class*="dark:text-"]),
+html.dark [class~="text-blue-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-blue-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-blue-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-blue-600"]:not([class*="dark:text-"]) {
+    color: #bfdbfe;
+}
+
+html.dark [class~="text-emerald-950"]:not([class*="dark:text-"]),
+html.dark [class~="text-emerald-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-emerald-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-emerald-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-emerald-600"]:not([class*="dark:text-"]) {
+    color: #a7f3d0;
+}
+
+html.dark [class~="text-green-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-green-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-green-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-green-600"]:not([class*="dark:text-"]) {
+    color: #a7f3d0;
+}
+
+html.dark [class~="text-gray-900"]:not([class*="dark:text-"]),
+html.dark [class~="text-gray-800"]:not([class*="dark:text-"]),
+html.dark [class~="text-gray-700"]:not([class*="dark:text-"]),
+html.dark [class~="text-gray-600"]:not([class*="dark:text-"]) {
+    color: #e2e8f0;
+}
+
+html.dark [class~="border-red-100"]:not([class*="dark:border-"]),
+html.dark [class~="border-red-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-red-300"]:not([class*="dark:border-"]) {
+    border-color: #7f3343;
+}
+
+html.dark [class~="border-amber-100"]:not([class*="dark:border-"]),
+html.dark [class~="border-amber-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-amber-300"]:not([class*="dark:border-"]),
+html.dark [class~="border-amber-400"]:not([class*="dark:border-"]) {
+    border-color: #735522;
+}
+
+html.dark [class~="border-blue-100"]:not([class*="dark:border-"]),
+html.dark [class~="border-blue-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-blue-300"]:not([class*="dark:border-"]) {
+    border-color: #365274;
+}
+
+html.dark [class~="border-emerald-100"]:not([class*="dark:border-"]),
+html.dark [class~="border-emerald-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-emerald-300"]:not([class*="dark:border-"]) {
+    border-color: #28634c;
+}
+
+html.dark [class~="border-gray-200"]:not([class*="dark:border-"]),
+html.dark [class~="border-gray-300"]:not([class*="dark:border-"]) {
+    border-color: #475569;
+}
+
+html.dark [class*="hover:bg-cream-"]:not([class*="dark:hover:bg-"]):hover,
+html.dark [class*="hover:bg-white"]:not([class*="dark:hover:bg-"]):hover {
+    background-color: #334155;
+}
+
+html.dark [class*="hover:bg-red-"]:not([class*="dark:hover:bg-"]):hover {
+    background-color: #512632;
+}
+
+html.dark [class*="hover:bg-amber-"]:not([class*="dark:hover:bg-"]):hover {
+    background-color: #4b391c;
+}
+
+html.dark [class*="hover:bg-blue-"]:not([class*="dark:hover:bg-"]):hover {
+    background-color: #263851;
+}
+
+html.dark [class*="hover:bg-emerald-"]:not([class*="dark:hover:bg-"]):hover {
+    background-color: #1c4435;
 }
 
 /* ─── Component Utilities ────────────────────────────────────────────────── */
 @layer components {
-  /* Touch-safe button press animation */
-  .press-btn {
-    @apply transition-all duration-75 active:scale-[0.96] active:brightness-95;
-  }
 
-  /* Item card in menu grid */
-  .menu-card {
-    @apply bg-white border border-cream-300 rounded-2xl p-4 flex flex-col justify-between
-           shadow-warm-sm cursor-pointer
-           hover:border-amber-400 hover:shadow-warm hover:bg-cream-50
-           transition-all duration-150 press-btn select-none;
-  }
+    /* Touch-safe button press animation */
+    .press-btn {
+        @apply transition-all duration-75 active:scale-[0.96] active:brightness-95;
+    }
 
-  .menu-card--active {
-    @apply bg-amber-50 border-amber-500 shadow-warm ring-2 ring-amber-400/30;
-  }
+    /* Item card in menu grid */
+    .menu-card {
+        @apply bg-white dark:bg-slate-850 dark:bg-slate-800 border border-cream-300 dark:border-slate-700 rounded-2xl p-4 flex flex-col justify-between shadow-warm-sm cursor-pointer hover:border-amber-400 dark:hover:border-amber-500 hover:shadow-warm hover:bg-cream-50 dark:hover:bg-slate-750 transition-all duration-150 press-btn select-none;
+    }
 
-  /* Standard form input */
-  .cafe-input {
-    @apply w-full bg-cream-50 border border-cream-300 rounded-xl px-4 py-2.5 text-coffee-800
-           placeholder-coffee-300 focus:outline-none focus:border-amber-500
-           focus:ring-2 focus:ring-amber-400/20 transition-colors text-sm;
-  }
+    .menu-card--active {
+        @apply bg-amber-50 dark:bg-amber-950/40 border-amber-500 shadow-warm ring-2 ring-amber-400/30;
+    }
 
-  /* Pill / badge */
-  .cafe-badge {
-    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
-  }
+    /* Standard form input */
+    .cafe-input {
+        @apply w-full bg-cream-50 dark:bg-slate-800 border border-cream-300 dark:border-slate-700 rounded-xl px-4 py-2.5 text-coffee-800 dark:text-slate-100 placeholder-coffee-300 dark:placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-400/20 transition-colors text-sm;
+    }
+
+    /* Pill / badge */
+    .cafe-badge {
+        @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
+    }
 }
 
 /* ─── No scrollbar utility ───────────────────────────────────────────────── */
-.no-scrollbar::-webkit-scrollbar { display: none; }
-.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
 
-.modal-backdrop { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; min-height: 100%; z-index: 50; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 100%;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow-y: auto;
+}

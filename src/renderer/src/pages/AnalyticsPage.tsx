@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Order, PosSettings, PosStats } from '../../../types/pos';
+import { EmployeeMetric, Order, PosSettings, PosStats } from '../../../types/pos';
 import { AuthSession } from '../../../types/auth';
 import { PosLoader } from '../components/PosLoader';
 import {
-    BarChart3, TrendingUp, DollarSign, Receipt, Armchair, Calendar, RefreshCw,
-    Award, Laptop, Zap, Utensils, ShoppingBag, Info, Clock, Lightbulb
+    BarChart3, TrendingUp, DollarSign, Receipt, Armchair, Calendar, RefreshCw, Search,
+    Award, Zap, Utensils, ShoppingBag, Info, Lightbulb, Users
 } from 'lucide-react';
 
 interface Props {
@@ -71,18 +71,20 @@ const EmptyState: React.FC<{ icon: React.ReactNode; title: string; text: string 
 );
 
 export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
+    const [activeAnalyticsTab, setActiveAnalyticsTab] = useState<'sales' | 'employees'>('sales');
     const [orders, setOrders] = useState<Order[]>([]);
+    const [employeeMetrics, setEmployeeMetrics] = useState<EmployeeMetric[]>([]);
+    const [employeeSearch, setEmployeeSearch] = useState('');
+    const [grossProfit, setGrossProfit] = useState<number | null>(null);
     const [stats, setStats] = useState<PosStats>({
         todaySales: 0,
         todayOrdersCount: 0,
         nextToken: 1,
         activeTablesCount: 0,
-        counterBreakdown: [],
         channelBreakdown: { walkIn: 0, dineIn: 0, takeaway: 0, walkInCount: 0, dineInCount: 0, takeawayCount: 0 },
     });
     const [loading, setLoading] = useState(true);
     const [initialLoadComplete, setInitialLoadComplete] = useState(false);
-    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const today = useMemo(() => new Date().toLocaleDateString('en-CA'), []);
     const weekStart = useMemo(() => { const date = new Date(); date.setDate(date.getDate() - ((date.getDay() + 6) % 7)); return date.toLocaleDateString('en-CA'); }, []);
     const monthStart = useMemo(() => { const date = new Date(); date.setDate(1); return date.toLocaleDateString('en-CA'); }, []);
@@ -99,7 +101,8 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                 const response = await window.api.getAnalytics(startDate, endDate, session.sessionToken);
                 if (!response.success || !response.data) throw new Error(response.error || 'Could not load the selected date range.');
                 setOrders(response.data.orders); setStats(response.data.stats);
-                setLastUpdated(new Date());
+                setEmployeeMetrics(response.data.employeeMetrics || []);
+                setGrossProfit(response.data.grossProfit ?? null);
             }
         } catch (err) {
             console.error('Failed to load analytics data:', err);
@@ -146,7 +149,6 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
             takeawayCount: channels.takeawayCount,
             avgOrderValue: stats.todayOrdersCount ? Math.round(stats.todaySales / stats.todayOrdersCount) : 0,
             topItems: Object.values(itemMap).sort((a, b) => b.revenue - a.revenue),
-            countersList: [...stats.counterBreakdown].sort((a, b) => b.sales - a.sales),
         };
     }, [orders, stats]);
 
@@ -164,7 +166,8 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
     const kpis = [
         { label: 'Total Sales', value: money(analytics.combinedTotal), hint: 'Total revenue collected', Icon: DollarSign },
         { label: 'Bills Issued', value: stats.todayOrdersCount.toLocaleString(), hint: 'Total paid orders', Icon: Receipt },
-        { label: 'Average Bill', value: money(analytics.avgOrderValue), hint: 'Sales per customer order', Icon: TrendingUp },
+        { label: 'Average Bill', value: money(analytics.avgOrderValue), hint: 'Sales per bill', Icon: TrendingUp },
+        { label: 'Gross Profit', value: grossProfit === null ? 'Cost data incomplete' : money(grossProfit), hint: 'Before fixed operating costs', Icon: DollarSign },
         { label: 'Active Tables', value: stats.activeTablesCount.toLocaleString(), hint: 'Currently occupied tables', Icon: Armchair },
     ];
 
@@ -189,9 +192,17 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
 
     const maxRevenue = analytics.topItems[0]?.revenue || 1;
     const topFive = analytics.topItems.slice(0, 5);
+    const maxEmployeeSales = Math.max(1, ...employeeMetrics.map(employee => employee.totalSales));
+    const maxEmployeeBills = Math.max(1, ...employeeMetrics.map(employee => employee.orderCount));
+    const maxEmployeeAverage = Math.max(1, ...employeeMetrics.map(employee => employee.avgOrderValue));
+    const visibleEmployeeMetrics = useMemo(() => {
+        const query = employeeSearch.trim().toLocaleLowerCase();
+        if (!query) return employeeMetrics;
+        return employeeMetrics.filter(employee => employee.employee.toLocaleLowerCase().includes(query) || employee.employeeId.toLocaleLowerCase().includes(query));
+    }, [employeeMetrics, employeeSearch]);
 
     return (
-        <div className="h-full w-full overflow-hidden flex flex-col p-3 md:p-4 space-y-3 bg-[#F8F6F0] select-none font-sans">
+        <div className="h-full w-full overflow-hidden flex flex-col p-3 md:p-4 space-y-3 bg-[#F8F6F0] dark:bg-slate-950 select-none font-sans">
             {loading && !initialLoadComplete && <PosLoader overlay message="Loading your cafe insights..." />}
 
             {/* ── Top Header Controls ───────────────────────────────────────── */}
@@ -247,18 +258,23 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                 </div>
             </div>
 
+            <div role="tablist" aria-label="Analytics views" className="flex shrink-0 gap-1 rounded-xl border border-cream-200 bg-white p-1 dark:border-slate-700 dark:bg-slate-900">
+                <button type="button" role="tab" aria-selected={activeAnalyticsTab === 'sales'} onClick={() => setActiveAnalyticsTab('sales')} className={`min-h-10 rounded-lg px-4 text-xs font-extrabold transition-colors ${activeAnalyticsTab === 'sales' ? 'bg-coffee-700 text-white dark:bg-amber-600' : 'text-coffee-600 hover:bg-cream-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Sales Analytics</button>
+                <button type="button" role="tab" aria-selected={activeAnalyticsTab === 'employees'} onClick={() => setActiveAnalyticsTab('employees')} className={`min-h-10 rounded-lg px-4 text-xs font-extrabold transition-colors ${activeAnalyticsTab === 'employees' ? 'bg-coffee-700 text-white dark:bg-amber-600' : 'text-coffee-600 hover:bg-cream-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Employee Sales Analytics</button>
+            </div>
+
             {rangeError && <div role="alert" className="shrink-0 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">{rangeError}</div>}
 
             {/* ── Plain English Summary Banner ──────────────────────────────── */}
-            <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-cream-200 bg-white px-4 py-3 shadow-sm">
+            {activeAnalyticsTab === 'sales' && <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-cream-200 bg-white px-4 py-3 shadow-sm">
                 <Info className="h-4 w-4 shrink-0 text-amber-600" />
                 <p className="text-xs md:text-sm text-coffee-700 leading-relaxed font-medium">
                     <span className="font-bold text-coffee-900">Summary: </span>{summary}
                 </p>
-            </div>
+            </div>}
 
             {/* ── Top 4 Key Metric Cards ────────────────────────────────────── */}
-            <div className="grid shrink-0 grid-cols-2 gap-3 lg:grid-cols-4">
+            {activeAnalyticsTab === 'sales' && <div className="grid shrink-0 grid-cols-2 gap-3 lg:grid-cols-5">
                 {kpis.map(({ label, value, hint, Icon }) => (
                     <div key={label} className="bg-white border border-cream-200 rounded-2xl p-4 shadow-sm relative overflow-hidden flex flex-col justify-between">
                         <div className="flex items-center justify-between text-coffee-500 mb-2">
@@ -273,42 +289,9 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                         </div>
                     </div>
                 ))}
-            </div>
+            </div>}
 
-            {/* ── 3-Column Detailed Information Layout with Bars ────────────── */}
-            <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))', gridAutoRows: 'minmax(15rem, 1fr)' }}>
-
-                {/* Card 1: Sales by Counter/Laptop */}
-                <Card
-                    icon={<Laptop className="h-4 w-4 text-coffee-700" />}
-                    title="Sales by Counter"
-                    subtitle="Performance per billing device"
-                    badge={plural(analytics.countersList.length, 'device')}
-                    tip="Easily identify which cash register or billing laptop generated the most revenue."
-                >
-                    {analytics.countersList.length === 0 ? (
-                        <EmptyState icon={<Laptop className="h-5 w-5" />} title="No counter activity" text="Data appears as soon as bills are settled." />
-                    ) : (
-                        analytics.countersList.map((counterData, idx) => {
-                            const share = analytics.combinedTotal > 0 ? Math.round((counterData.sales / analytics.combinedTotal) * 100) : 0;
-                            return (
-                                <div key={`${counterData.counter}-${idx}`} className="space-y-1.5 rounded-xl border border-cream-200/60 bg-cream-50/40 p-3">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <span className="text-xs font-bold text-coffee-800">{counterData.counter}</span>
-                                        <span className="text-xs font-black text-coffee-900">{money(counterData.sales)}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between text-[11px] text-coffee-500">
-                                        <span>{plural(counterData.count, 'bill')}</span>
-                                        <span className="font-semibold">{share}% share</span>
-                                    </div>
-                                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-cream-200">
-                                        <div className="h-full rounded-full bg-coffee-700 transition-all duration-300" style={{ width: `${share}%` }} />
-                                    </div>
-                                </div>
-                            );
-                        })
-                    )}
-                </Card>
+            {activeAnalyticsTab === 'sales' && <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))', gridAutoRows: 'minmax(15rem, 1fr)' }}>
 
                 {/* Card 2: Sales by Order Type */}
                 <Card
@@ -376,7 +359,45 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                         })
                     )}
                 </Card>
-            </div>
+
+            </div>}
+
+            {activeAnalyticsTab === 'employees' && <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <div className="flex shrink-0 items-center gap-3 rounded-xl border border-cream-200 bg-white px-3 py-2 shadow-sm">
+                    <div className="relative min-w-0 flex-1">
+                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-coffee-400" />
+                        <input type="search" value={employeeSearch} onChange={event => setEmployeeSearch(event.target.value)} aria-label="Search employee performance" placeholder="Search staff name or ID" className="cafe-input !py-2 !pl-10" />
+                    </div>
+                    <span className="shrink-0 text-xs font-bold text-coffee-500">{plural(visibleEmployeeMetrics.length, 'employee')}</span>
+                </div>
+                <section className="grid min-h-0 flex-1 grid-cols-1 content-start gap-3 overflow-y-auto md:grid-cols-2 lg:grid-cols-3">
+                    {visibleEmployeeMetrics.length === 0 ? (
+                        <EmptyState icon={<Users className="h-5 w-5" />} title={employeeSearch.trim() ? 'No matching employee' : 'No employee activity'} text={employeeSearch.trim() ? 'Try another staff name or ID.' : 'Employee bill volume appears after orders are saved.'} />
+                    ) : visibleEmployeeMetrics.map(employee => (
+                        <article key={employee.employeeId} className="space-y-4 rounded-2xl border border-cream-200 bg-white p-4 shadow-sm">
+                            <header className="flex items-center justify-between gap-3 border-b border-cream-100 pb-3">
+                                <div className="min-w-0"><h2 className="truncate text-base font-black text-coffee-800" title={`${employee.employee} · ${employee.employeeId}`}>{employee.employee}</h2><p className="truncate text-[10px] text-coffee-400">{employee.employeeId}</p></div>
+                                <span className="shrink-0 text-right"><strong className="block text-lg font-black text-coffee-900">{money(employee.totalSales)}</strong><span className="text-[10px] font-bold uppercase text-coffee-500">Total sales</span></span>
+                            </header>
+                            <div className="space-y-3" aria-label={`Performance comparison for ${employee.employee}`}>
+                                <div><div className="mb-1 flex justify-between gap-3 text-xs"><span className="font-bold text-coffee-600">Sales volume</span><strong className="text-coffee-900">{money(employee.totalSales)}</strong></div><div className="h-2 overflow-hidden rounded-full bg-cream-200"><div className="h-full rounded-full bg-coffee-700" style={{ width: `${Math.min(100, employee.totalSales / maxEmployeeSales * 100)}%` }} /></div></div>
+                                <div><div className="mb-1 flex justify-between gap-3 text-xs"><span className="font-bold text-coffee-600">Bills</span><strong className="text-coffee-900">{plural(employee.orderCount, 'bill')}</strong></div><div className="h-2 overflow-hidden rounded-full bg-cream-200"><div className="h-full rounded-full bg-amber-500" style={{ width: `${Math.min(100, employee.orderCount / maxEmployeeBills * 100)}%` }} /></div></div>
+                                <div><div className="mb-1 flex justify-between gap-3 text-xs"><span className="font-bold text-coffee-600">Average bill</span><strong className="text-coffee-900">{money(employee.avgOrderValue)}</strong></div><div className="h-2 overflow-hidden rounded-full bg-cream-200"><div className="h-full rounded-full bg-emerald-600" style={{ width: `${Math.min(100, employee.avgOrderValue / maxEmployeeAverage * 100)}%` }} /></div></div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                                <div className="rounded-lg bg-cream-50 p-2"><span className="block text-[10px] font-bold uppercase text-coffee-400">Gross profit</span><strong className="text-coffee-800">{employee.grossProfit === null ? 'Cost data incomplete' : money(employee.grossProfit)}</strong></div>
+                                <div className="rounded-lg bg-cream-50 p-2"><span className="block text-[10px] font-bold uppercase text-coffee-400">Channels</span><strong className="text-coffee-800">Dine {employee.dineInCount} · Walk {employee.walkInCount} · To-go {employee.takeawayCount}</strong></div>
+                            </div>
+                            <div className="border-t border-cream-100 pt-3"><h3 className="mb-2 text-[10px] font-black uppercase tracking-wide text-coffee-500">Top dishes</h3>
+                                {employee.dishes.length === 0 ? <p className="text-xs text-coffee-400">No dish detail available.</p> : employee.dishes.slice(0, 3).map((dish, index) => {
+                                    const topUnits = Math.max(1, employee.dishes[0]?.unitsSold || 0);
+                                    return <div key={`${dish.name}-${dish.variant || ''}`} className="mb-2 last:mb-0"><div className="mb-1 flex items-center justify-between gap-2 text-xs"><span className="min-w-0 truncate font-semibold text-coffee-700" title={dish.variant ? `${dish.name} (${dish.variant})` : dish.name}>{index + 1}. {dish.name}{dish.variant ? ` · ${dish.variant}` : ''}</span><span className="shrink-0 text-right font-semibold text-coffee-700">{dish.unitsSold} sold · {money(dish.sales)}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-cream-200"><div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.min(100, dish.unitsSold / topUnits * 100)}%` }} /></div></div>;
+                                })}
+                            </div>
+                        </article>
+                    ))}
+                </section>
+            </div>}
         </div>
     );
 };
