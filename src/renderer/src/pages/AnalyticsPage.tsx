@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { EmployeeMetric, Order, PosSettings, PosStats } from '../../../types/pos';
+import { EmployeeMetric, InventorySpendingReport, Order, PosSettings, PosStats } from '../../../types/pos';
 import { AuthSession } from '../../../types/auth';
 import { PosLoader } from '../components/PosLoader';
 import {
@@ -71,7 +71,7 @@ const EmptyState: React.FC<{ icon: React.ReactNode; title: string; text: string 
 );
 
 export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
-    const [activeAnalyticsTab, setActiveAnalyticsTab] = useState<'sales' | 'employees'>('sales');
+    const [activeAnalyticsTab, setActiveAnalyticsTab] = useState<'sales' | 'employees' | 'inventory'>('sales');
     const [orders, setOrders] = useState<Order[]>([]);
     const [employeeMetrics, setEmployeeMetrics] = useState<EmployeeMetric[]>([]);
     const [employeeSearch, setEmployeeSearch] = useState('');
@@ -91,8 +91,12 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
     const [range, setRange] = useState({ start: today, end: today });
     const [preset, setPreset] = useState<Preset>('today');
     const [rangeError, setRangeError] = useState('');
+    const [inventorySpending, setInventorySpending] = useState<InventorySpendingReport | null>(null);
+    const [spendingLoading, setSpendingLoading] = useState(false);
+    const [spendingError, setSpendingError] = useState('');
 
     const money = (n: number) => `${settings.currency} ${n.toLocaleString()}`;
+    const moneyMinor = (minor: number, currency = settings.currency) => `${currency} ${(minor / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
     const loadData = async (startDate = range.start, endDate = range.end) => {
         setLoading(true); setRangeError('');
@@ -110,11 +114,33 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
         } finally { setLoading(false); setInitialLoadComplete(true); }
     };
 
+    const loadInventorySpending = async (startDate = range.start, endDate = range.end) => {
+        setSpendingLoading(true);
+        setSpendingError('');
+        try {
+            if (!window.api) throw new Error('Inventory spending is available only in the desktop application.');
+            const response = await window.api.getInventorySpending(startDate, endDate, session.sessionToken);
+            if (!response.success || !response.data) throw new Error(response.error || 'Could not load inventory spending.');
+            setInventorySpending(response.data);
+        } catch (error) {
+            setSpendingError(error instanceof Error ? error.message : 'Could not load inventory spending.');
+        } finally {
+            setSpendingLoading(false);
+        }
+    };
+
     useEffect(() => {
         loadData(range.start, range.end);
         const refreshTimer = window.setInterval(() => loadData(range.start, range.end), 15000);
         return () => window.clearInterval(refreshTimer);
     }, [range.start, range.end]);
+
+    useEffect(() => {
+        if (activeAnalyticsTab !== 'inventory') return;
+        void loadInventorySpending(range.start, range.end);
+        const timer = window.setInterval(() => void loadInventorySpending(range.start, range.end), 15000);
+        return () => window.clearInterval(timer);
+    }, [activeAnalyticsTab, range.start, range.end]);
 
     const choosePreset = (value: Preset) => {
         setPreset(value);
@@ -212,8 +238,8 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                         <BarChart3 className="w-5 h-5" />
                     </div>
                     <div>
-                        <h1 className="text-lg font-extrabold text-coffee-800 tracking-tight leading-tight">Sales Dashboard</h1>
-                        <p className="text-xs text-coffee-500">Live overview of your cafe performance (updates every 15s)</p>
+                        <h1 className="text-lg font-extrabold text-coffee-800 tracking-tight leading-tight">Analytics</h1>
+                        <p className="text-xs text-coffee-500">Sales and inventory performance (updates every 15s)</p>
                     </div>
                 </div>
 
@@ -247,12 +273,12 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                         <span>{rangeLabel}</span>
                     </div>
                     <button
-                        onClick={() => loadData(range.start, range.end)}
-                        disabled={loading}
+                        onClick={() => activeAnalyticsTab === 'inventory' ? void loadInventorySpending(range.start, range.end) : void loadData(range.start, range.end)}
+                        disabled={activeAnalyticsTab === 'inventory' ? spendingLoading : loading}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cream-100 hover:bg-cream-200 border border-cream-300 text-xs font-bold text-coffee-700 transition-all active:scale-95 disabled:opacity-60"
                         title="Update numbers now"
                     >
-                        <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`w-3.5 h-3.5 ${(activeAnalyticsTab === 'inventory' ? spendingLoading : loading) ? 'animate-spin' : ''}`} />
                         <span>Refresh</span>
                     </button>
                 </div>
@@ -261,6 +287,7 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
             <div role="tablist" aria-label="Analytics views" className="flex shrink-0 gap-1 rounded-xl border border-cream-200 bg-white p-1 dark:border-slate-700 dark:bg-slate-900">
                 <button type="button" role="tab" aria-selected={activeAnalyticsTab === 'sales'} onClick={() => setActiveAnalyticsTab('sales')} className={`min-h-10 rounded-lg px-4 text-xs font-extrabold transition-colors ${activeAnalyticsTab === 'sales' ? 'bg-coffee-700 text-white dark:bg-amber-600' : 'text-coffee-600 hover:bg-cream-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Sales Analytics</button>
                 <button type="button" role="tab" aria-selected={activeAnalyticsTab === 'employees'} onClick={() => setActiveAnalyticsTab('employees')} className={`min-h-10 rounded-lg px-4 text-xs font-extrabold transition-colors ${activeAnalyticsTab === 'employees' ? 'bg-coffee-700 text-white dark:bg-amber-600' : 'text-coffee-600 hover:bg-cream-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Employee Sales Analytics</button>
+                <button type="button" role="tab" aria-selected={activeAnalyticsTab === 'inventory'} onClick={() => setActiveAnalyticsTab('inventory')} className={`min-h-10 rounded-lg px-4 text-xs font-extrabold transition-colors ${activeAnalyticsTab === 'inventory' ? 'bg-coffee-700 text-white dark:bg-amber-600' : 'text-coffee-600 hover:bg-cream-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Inventory Spending</button>
             </div>
 
             {rangeError && <div role="alert" className="shrink-0 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">{rangeError}</div>}
@@ -398,6 +425,47 @@ export const AnalyticsPage: React.FC<Props> = ({ session, settings }) => {
                     ))}
                 </section>
             </div>}
+
+            {activeAnalyticsTab === 'inventory' && <section className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+                {spendingError && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-semibold text-red-700">{spendingError}</div>}
+                {spendingLoading && !inventorySpending ? <PosLoader message="Loading inventory spending..." /> : inventorySpending && <>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <article className="rounded-2xl border border-cream-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-center justify-between text-coffee-500"><span className="text-xs font-bold uppercase">Total inventory expenditure</span><ShoppingBag className="h-4 w-4" /></div>
+                            <p className="mt-2 text-2xl font-black text-coffee-900">{moneyMinor(inventorySpending.total_spend_minor, inventorySpending.currency)}</p>
+                            <p className="mt-1 text-xs text-coffee-400">Purchases dated {rangeLabel}</p>
+                        </article>
+                        <article className="rounded-2xl border border-cream-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-center justify-between text-coffee-500"><span className="text-xs font-bold uppercase">Estimated recipe COGS</span><DollarSign className="h-4 w-4" /></div>
+                            <p className="mt-2 text-2xl font-black text-coffee-900">{moneyMinor(inventorySpending.estimated_cogs_minor, inventorySpending.currency)}</p>
+                            <p className="mt-1 text-xs text-coffee-400">{inventorySpending.cogs_complete ? 'Weighted-average purchase cost' : 'Estimate incomplete: some consumed ingredients lack purchase costs'}</p>
+                        </article>
+                        <article className="rounded-2xl border border-cream-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-center justify-between text-coffee-500"><span className="text-xs font-bold uppercase">Suppliers</span><Users className="h-4 w-4" /></div>
+                            <p className="mt-2 text-2xl font-black text-coffee-900">{inventorySpending.supplier_spending.length}</p>
+                            <p className="mt-1 text-xs text-coffee-400">Suppliers with purchases in this range</p>
+                        </article>
+                    </div>
+                    <section className="rounded-2xl border border-cream-200 bg-white p-5 shadow-sm">
+                        <div className="mb-4 flex items-center justify-between gap-3 border-b border-cream-100 pb-3">
+                            <div><h2 className="text-base font-black text-coffee-800">Supplier spending</h2><p className="text-xs text-coffee-500">Grouped by recorded inventory purchases</p></div>
+                            <span className="text-xs font-bold text-coffee-500">{plural(inventorySpending.supplier_spending.reduce((count, supplier) => count + supplier.purchase_count, 0), 'purchase')}</span>
+                        </div>
+                        {inventorySpending.supplier_spending.length === 0 ? <EmptyState icon={<ShoppingBag className="h-5 w-5" />} title="No inventory purchases" text="Purchases recorded in Raw Materials will appear for this date range." /> : <div className="space-y-4">
+                            {inventorySpending.supplier_spending.map((supplier, index) => {
+                                const maxSpend = Math.max(1, inventorySpending.supplier_spending[0]?.spend_minor || 0);
+                                const share = Math.round(supplier.spend_minor / maxSpend * 100);
+                                const barColors = ['bg-emerald-600', 'bg-amber-500', 'bg-blue-600', 'bg-rose-600'];
+                                return <div key={supplier.supplier} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2">
+                                    <div className="min-w-0"><p className="truncate text-sm font-bold text-coffee-800">{supplier.supplier}</p><p className="text-xs text-coffee-400">{plural(supplier.purchase_count, 'purchase')}</p></div>
+                                    <strong className="text-sm font-black text-coffee-900">{moneyMinor(supplier.spend_minor, inventorySpending.currency)}</strong>
+                                    <div className="col-span-2 h-2 overflow-hidden rounded-full bg-cream-100"><div className={`h-full rounded-full ${barColors[index % barColors.length]}`} style={{ width: `${share}%` }} /></div>
+                                </div>;
+                            })}
+                        </div>}
+                    </section>
+                </>}
+            </section>}
         </div>
     );
 };

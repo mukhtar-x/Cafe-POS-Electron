@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PosSettings, Order, AuditLog } from '../../../types/pos';
-import { AuthSession } from '../../../types/auth';
+import { AdminOverrideGrant, AdminOverrideScope, AuthSession } from '../../../types/auth';
 import { PosLoader } from '../components/PosLoader';
 import { PosToast } from '../components/PosToast';
 import { AdminPinModal } from '../components/AdminPinModal';
@@ -61,7 +61,6 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
     const [cashierUsername, setCashierUsername] = useState('');
     const [cashierDisplayName, setCashierDisplayName] = useState('');
     const [cashierPin, setCashierPin] = useState('');
-    const [managerPin, setManagerPin] = useState('');
     const [shiftDialogOpen, setShiftDialogOpen] = useState(false);
     const [handoverBusy, setHandoverBusy] = useState(false);
     const [shiftSummary, setShiftSummary] = useState<{ shiftId: string; nextShiftId: string; revenue: number; orders: number; closedAt: string } | null>(null);
@@ -72,9 +71,11 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
     const [resetConfirmation, setResetConfirmation] = useState('');
     const [backupNotice, setBackupNotice] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
     const [adminPinOpen, setAdminPinOpen] = useState(false);
-    const pendingAdminAction = useRef<(() => void) | null>(null);
+    const [adminPinScope, setAdminPinScope] = useState<AdminOverrideScope>('settings:write');
+    const pendingAdminAction = useRef<((grant: AdminOverrideGrant) => void) | null>(null);
 
-    const requireAdminPin = (action: () => void) => {
+    const requireAdminPin = (scope: AdminOverrideScope, action: (grant: AdminOverrideGrant) => void) => {
+        setAdminPinScope(scope);
         pendingAdminAction.current = action;
         setAdminPinOpen(true);
     };
@@ -109,17 +110,15 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         loadSettings();
     }, []);
 
-    const saveSettings = async () => {
+    const saveSettings = async (authorizationToken: string) => {
         setSaving(true);
         setSaveSuccess(false);
 
         try {
             if (window.api) {
                 const settingsToSave = { ...formData, printer_interface: formData.printer_interface === 'network' ? 'network' : 'none' };
-                for (const [key, value] of Object.entries(settingsToSave)) {
-                    const result = await window.api.updateSetting(key, String(value), session.user.username, session.sessionToken);
-                    if (!result.success) throw new Error(result.error || `Could not save ${key}.`);
-                }
+                const result = await window.api.updateSettings(settingsToSave, authorizationToken, session.sessionToken);
+                if (!result.success) throw new Error(result.error || 'Could not save settings.');
                 const fontScale = clampFontScale(settingsToSave.font_scale);
                 const fontChanged = fontScale !== savedFontScale;
                 await loadSettings();
@@ -140,18 +139,18 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
 
     const handleSave = (e?: React.FormEvent) => {
         e?.preventDefault();
-        requireAdminPin(() => { void saveSettings(); });
+        requireAdminPin('settings:write', grant => { void saveSettings(grant.authorizationToken); });
     };
 
     const resizeTables = (delta: -1 | 1) => {
-        requireAdminPin(() => { void performResizeTables(delta); });
+        requireAdminPin('settings:write', grant => { void performResizeTables(delta, grant.authorizationToken); });
     };
 
-    const performResizeTables = async (delta: -1 | 1) => {
+    const performResizeTables = async (delta: -1 | 1, authorizationToken: string) => {
         setTableCountMessage(''); setTableBusy(true);
         try {
             if (!window.api) throw new Error('Table management requires the desktop app.');
-            const response = await window.api.setTableCount(tableCount + delta, session.user.username, session.sessionToken);
+            const response = await window.api.setTableCount(tableCount + delta, authorizationToken, session.sessionToken);
             if (!response.success || !response.data) throw new Error(response.error || 'Could not update table count.');
             setTableCount(response.data.length); setTableCountMessage(`Floor now has ${response.data.length} tables.`);
         } catch (error) { setTableCountMessage(error instanceof Error ? error.message : 'Could not update table count.'); }
@@ -168,23 +167,23 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         if (result.success) { setCurrentPin(''); setNewPin(''); setConfirmPin(''); }
     };
 
-    const handleExportBackup = async () => {
+    const handleExportBackup = async (authorizationToken: string) => {
         if (!window.api) { setBackupNotice({ tone: 'error', message: 'Database backups are available in the installed desktop application.' }); return; }
         setBackupBusy(true); setBackupNotice(null);
         try {
-            const result = await window.api.exportDatabaseBackup(session.sessionToken);
+            const result = await window.api.exportDatabaseBackup(authorizationToken, session.sessionToken);
             if (!result.success && !result.canceled) throw new Error(result.error || 'Could not export the database backup.');
             if (result.success) setBackupNotice({ tone: 'success', message: 'Database backup exported successfully.' });
         } catch (error) { setBackupNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Could not export the database backup.' }); }
         finally { setBackupBusy(false); }
     };
 
-    const handleRestoreBackup = async () => {
+    const handleRestoreBackup = async (authorizationToken: string) => {
         setRestoreConfirmOpen(false);
         if (!window.api) { setBackupNotice({ tone: 'error', message: 'Database restore is available in the installed desktop application.' }); return; }
         setBackupBusy(true); setBackupNotice(null);
         try {
-            const result = await window.api.restoreDatabaseBackup(session.sessionToken);
+            const result = await window.api.restoreDatabaseBackup(authorizationToken, session.sessionToken);
             if (!result.success && !result.canceled) throw new Error(result.error || 'Could not restore this backup.');
             if (result.success) {
                 setBackupNotice({ tone: 'success', message: 'Backup restored. The POS will reload and ask you to sign in again.' });
@@ -194,12 +193,12 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         finally { setBackupBusy(false); }
     };
 
-    const handleResetApplication = async () => {
+    const handleResetApplication = async (authorizationToken: string) => {
         if (resetConfirmation.trim() !== 'RESET') return;
         if (!window.api) { setBackupNotice({ tone: 'error', message: 'Application reset is available in the installed desktop app.' }); return; }
         setBackupBusy(true); setBackupNotice(null); setResetConfirmOpen(false);
         try {
-            const result = await window.api.resetApplicationData(session.sessionToken);
+            const result = await window.api.resetApplicationData(authorizationToken, session.sessionToken);
             if (!result.success) throw new Error(result.error || 'Could not reset the application.');
             setBackupNotice({ tone: 'success', message: `Application reset. Your full recovery backup is saved in the private backups folder as ${result.backupFile}. The POS will reopen for initial manager setup.` });
             window.setTimeout(() => window.location.reload(), 2600);
@@ -208,11 +207,11 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         } finally { setBackupBusy(false); setResetConfirmation(''); }
     };
 
-    const handleShiftHandover = async () => {
+    const handleShiftHandover = async (authorizationToken: string) => {
         if (!window.api) { setShiftError('Shift management requires the installed desktop application.'); return; }
         setHandoverBusy(true); setShiftError('');
         try {
-            const result = await window.api.handoverShift(session.sessionToken);
+            const result = await window.api.handoverShift(authorizationToken, session.sessionToken);
             if (!result.success || !result.data) throw new Error(result.error || 'Could not close the shift.');
             setShiftSummary(result.data);
             await loadSettings();
@@ -220,12 +219,16 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
         finally { setHandoverBusy(false); }
     };
 
-    const handleAddCashier = async (event: React.FormEvent) => {
+    const handleAddCashier = (event: React.FormEvent) => {
         event.preventDefault(); setCredentialMessage('');
         if (!window.api) { setCredentialMessage('Cashier setup requires the desktop application.'); return; }
-        const result = await window.api.addCashier(session.user.username, managerPin, cashierUsername, cashierDisplayName, cashierPin, session.sessionToken);
-        setCredentialMessage(result.success ? 'Cashier account created.' : result.error || 'Could not create cashier.');
-        if (result.success) { setManagerPin(''); setCashierPin(''); setCashierUsername(''); setCashierDisplayName(''); }
+        requireAdminPin('settings:write', grant => {
+            void (async () => {
+                const result = await window.api!.addCashier(cashierUsername, cashierDisplayName, cashierPin, grant.authorizationToken, session.sessionToken);
+                setCredentialMessage(result.success ? 'Cashier account created.' : result.error || 'Could not create cashier.');
+                if (result.success) { setCashierPin(''); setCashierUsername(''); setCashierDisplayName(''); }
+            })();
+        });
     };
 
     const handleTestPrinter = async () => {
@@ -263,7 +266,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                     <h2 id="shift-dialog-title" className="text-xl font-black text-coffee-900">{shiftSummary ? 'Shift closed' : 'Confirm shift handover'}</h2>
                     {shiftSummary ? <div className="mt-4 space-y-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950"><p><strong>Orders processed:</strong> {shiftSummary.orders}</p><p><strong>Net shift revenue:</strong> {formData.currency} {shiftSummary.revenue.toLocaleString()}</p><p><strong>Closed:</strong> {new Date(shiftSummary.closedAt).toLocaleString('en-PK')}</p><p className="pt-2 font-extrabold">The next order will receive Token #001.</p></div> : <p className="mt-2 text-sm leading-relaxed text-coffee-600">This records the current shift summary and starts a new token sequence. Existing receipts remain saved and searchable.</p>}
                     {shiftError && <p role="alert" className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">{shiftError}</p>}
-                    <div className="mt-6 flex justify-end gap-3"><button type="button" disabled={handoverBusy} onClick={() => setShiftDialogOpen(false)} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">{shiftSummary ? 'Close' : 'Cancel'}</button>{!shiftSummary && <button type="button" disabled={handoverBusy} onClick={() => void handleShiftHandover()} className="min-h-11 rounded-xl bg-coffee-700 px-4 text-sm font-extrabold text-white hover:bg-coffee-800 disabled:opacity-60">{handoverBusy ? 'Closing shift...' : 'Confirm & Start New Shift'}</button>}</div>
+                    <div className="mt-6 flex justify-end gap-3"><button type="button" disabled={handoverBusy} onClick={() => setShiftDialogOpen(false)} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">{shiftSummary ? 'Close' : 'Cancel'}</button>{!shiftSummary && <button type="button" disabled={handoverBusy} onClick={() => requireAdminPin('shift:handover', grant => { void handleShiftHandover(grant.authorizationToken); })} className="min-h-11 rounded-xl bg-coffee-700 px-4 text-sm font-extrabold text-white hover:bg-coffee-800 disabled:opacity-60">{handoverBusy ? 'Closing shift...' : 'Confirm & Start New Shift'}</button>}</div>
                 </section>
             </div>}
             {backupNotice && <PosToast message={backupNotice.message} tone={backupNotice.tone} onDismiss={() => setBackupNotice(null)} />}
@@ -272,14 +275,14 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                     <div className="flex items-start gap-3"><div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700"><TriangleAlert className="h-5 w-5" /></div><div><h2 id="reset-dialog-title" className="text-xl font-black text-coffee-900">Reset this POS terminal?</h2><p id="reset-dialog-description" className="mt-2 text-sm leading-relaxed text-coffee-600">All live records on this laptop will be cleared, including receipts, menu items, settings, tables, and staff accounts. Before resetting, CafePOS creates and verifies a complete recovery file in its private <strong>backups</strong> folder. You can restore that file later from Data &amp; Backup.</p></div></div>
                     <label className="mt-5 block text-xs font-extrabold text-coffee-700" htmlFor="reset-confirmation">Type RESET to continue</label>
                     <input id="reset-confirmation" autoComplete="off" value={resetConfirmation} onChange={event => setResetConfirmation(event.target.value)} className="cafe-input mt-2" placeholder="RESET" />
-                    <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => { setResetConfirmOpen(false); setResetConfirmation(''); }} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">Cancel</button><button type="button" disabled={resetConfirmation.trim() !== 'RESET' || backupBusy} onClick={() => void handleResetApplication()} className="flex min-h-11 items-center gap-2 rounded-xl bg-red-700 px-4 text-sm font-extrabold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"><RefreshCw className="h-4 w-4" />Create Backup &amp; Reset</button></div>
+                    <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => { setResetConfirmOpen(false); setResetConfirmation(''); }} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">Cancel</button><button type="button" disabled={resetConfirmation.trim() !== 'RESET' || backupBusy} onClick={() => requireAdminPin('db:reset', grant => { void handleResetApplication(grant.authorizationToken); })} className="flex min-h-11 items-center gap-2 rounded-xl bg-red-700 px-4 text-sm font-extrabold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"><RefreshCw className="h-4 w-4" />Create Backup &amp; Reset</button></div>
                 </section>
             </div>}
             {restoreConfirmOpen && <div className="fixed inset-0 z-[110] flex items-center justify-center bg-coffee-950/60 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRestoreConfirmOpen(false); }}>
                 <section role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title" className="w-full max-w-md rounded-3xl border border-cream-200 dark:border-slate-700 bg-[#FDFBF7] dark:bg-slate-900 p-6 shadow-2xl">
                     <h2 id="restore-dialog-title" className="text-xl font-black text-coffee-900">Restore database backup?</h2>
                     <p className="mt-2 text-sm leading-relaxed text-coffee-600">The selected backup will replace the POS database on this laptop. The current database is kept temporarily so it can be recovered if restore fails.</p>
-                    <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setRestoreConfirmOpen(false)} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">Cancel</button><button type="button" onClick={() => void handleRestoreBackup()} className="min-h-11 rounded-xl bg-coffee-700 px-4 text-sm font-extrabold text-white hover:bg-coffee-800">Choose Backup & Restore</button></div>
+                    <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setRestoreConfirmOpen(false)} className="min-h-11 rounded-xl border border-cream-300 px-4 text-sm font-bold text-coffee-700">Cancel</button><button type="button" onClick={() => requireAdminPin('db:restore', grant => { void handleRestoreBackup(grant.authorizationToken); })} className="min-h-11 rounded-xl bg-coffee-700 px-4 text-sm font-extrabold text-white hover:bg-coffee-800">Choose Backup & Restore</button></div>
                 </section>
             </div>}
             <div className="grid min-h-0 w-full min-w-0 flex-1 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)] gap-0">
@@ -293,12 +296,14 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                         ['data', 'Data & Backup', Database],
                     ].map(([key, label, Icon]) => { const active = activePane === key; const PaneIcon = Icon as React.ComponentType<{ className?: string }>; return <button key={key as string} type="button" onClick={() => setActivePane(key as typeof activePane)} aria-current={active ? 'page' : undefined} className={`mb-1 flex min-h-11 2xl:min-h-12 shrink-0 md:w-full items-center gap-3 2xl:gap-4 rounded-xl px-3 2xl:px-4 text-left text-xs 2xl:text-sm font-bold transition-colors ${active ? 'bg-coffee-700 text-white shadow-warm' : 'text-coffee-600 hover:bg-cream-100'}`}><PaneIcon className="h-4 w-4 2xl:h-5 2xl:w-5 shrink-0" /><span>{label as string}</span></button>; })}
                     <div className="ml-auto shrink-0 md:ml-0 md:mt-auto md:border-t md:border-cream-200 md:pt-3">
-                        <button type="button" disabled={restartRequested} onClick={async () => {
-                            if (!window.api) { setBackupNotice({ tone: 'error', message: 'Restart is available in the installed desktop application.' }); return; }
-                            setRestartRequested(true);
-                            const result = await window.api.restartApplication(session.sessionToken);
-                            if (!result.success) { setRestartRequested(false); setBackupNotice({ tone: 'error', message: 'The POS could not restart. Please close and reopen the application.' }); }
-                        }} className="flex min-h-11 2xl:min-h-12 w-full items-center gap-3 2xl:gap-4 rounded-xl border border-amber-300 bg-amber-50 px-3 2xl:px-4 text-left text-xs 2xl:text-sm font-extrabold text-amber-900 shadow-sm hover:bg-amber-100 disabled:opacity-60">
+                        <button type="button" disabled={restartRequested} onClick={() => requireAdminPin('app:restart', grant => {
+                            void (async () => {
+                                if (!window.api) { setBackupNotice({ tone: 'error', message: 'Restart is available in the installed desktop application.' }); return; }
+                                setRestartRequested(true);
+                                const result = await window.api.restartApplication(grant.authorizationToken, session.sessionToken);
+                                if (!result.success) { setRestartRequested(false); setBackupNotice({ tone: 'error', message: result.error || 'The POS could not restart. Please close and reopen the application.' }); }
+                            })();
+                        })} className="flex min-h-11 2xl:min-h-12 w-full items-center gap-3 2xl:gap-4 rounded-xl border border-amber-300 bg-amber-50 px-3 2xl:px-4 text-left text-xs 2xl:text-sm font-extrabold text-amber-900 shadow-sm hover:bg-amber-100 disabled:opacity-60">
                             <TriangleAlert className="h-4 w-4 2xl:h-5 2xl:w-5 shrink-0" /><span>{restartRequested ? 'Restarting...' : 'Restart POS App'}</span>
                         </button>
                     </div>
@@ -538,11 +543,10 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                                     </div>
                                     {session.user.role === 'admin' && <div className="flex min-w-0 flex-col gap-3 md:border-l md:border-cream-200 md:pl-6">
                                         <form onSubmit={handleAddCashier} className="grid grid-cols-1 gap-3">
-                                            <p className="text-xs font-bold text-coffee-700">Create a cashier account (verify with manager PIN)</p>
+                                            <p className="text-xs font-bold text-coffee-700">Create a cashier account (Admin PIN required)</p>
                                             <input aria-label="New cashier username" required minLength={3} maxLength={32} value={cashierUsername} onChange={e => setCashierUsername(e.target.value)} className="cafe-input" placeholder="Cashier username" />
                                             <input aria-label="Cashier display name" required maxLength={80} value={cashierDisplayName} onChange={e => setCashierDisplayName(e.target.value)} className="cafe-input" placeholder="Cashier / waiter display name" />
                                             <input aria-label="New cashier PIN or password" required minLength={6} maxLength={64} type="password" value={cashierPin} onChange={e => setCashierPin(e.target.value)} className="cafe-input" placeholder="Cashier PIN/password" />
-                                            <input aria-label="Manager verification PIN" required type="password" value={managerPin} onChange={e => setManagerPin(e.target.value)} className="cafe-input" placeholder="Manager verification PIN" />
                                             <button className="rounded-xl bg-cream-100 border border-cream-300 text-coffee-700 font-bold text-sm px-4 py-2 hover:bg-cream-200">Add Cashier</button>
                                         </form>
                                         <GuideNote title="Cashier accounts" items={['Usernames need 3 to 32 characters.', 'Each cashier PIN or password needs at least 6 characters.', 'A manager PIN is required to confirm every new cashier.']} />
@@ -559,7 +563,7 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
                         {activePane === 'data' && <section className="col-span-full flex min-w-0 flex-col gap-5 rounded-3xl border border-cream-200 bg-white p-6 shadow-warm-sm" aria-labelledby="backup-heading">
                             <div className="flex items-start gap-3 border-b border-cream-200 pb-4"><Database className="mt-0.5 h-5 w-5 text-coffee-600" /><div><h2 id="backup-heading" className="text-lg font-black text-coffee-800">Data & Database Backup</h2><p className="mt-1 text-sm text-coffee-500">The live database stays in this Windows account’s private application data folder. Export a portable copy before moving to another laptop or reinstalling Windows.</p></div></div>
                             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                                <article className="flex flex-col gap-3 rounded-2xl border border-cream-200 bg-cream-50 p-5"><h3 className="font-extrabold text-coffee-800">Export a backup</h3><p className="flex-1 text-sm leading-relaxed text-coffee-500">Save a consistent SQLite copy to a USB drive or a folder you choose. Keep the file somewhere separate from this laptop.</p><button type="button" disabled={backupBusy} onClick={() => void handleExportBackup()} className="flex min-h-12 items-center justify-center gap-2 self-start rounded-xl bg-coffee-700 px-5 text-sm font-extrabold text-white hover:bg-coffee-800 disabled:opacity-50"><Download className="h-4 w-4" />Export Database Backup</button></article>
+                                <article className="flex flex-col gap-3 rounded-2xl border border-cream-200 bg-cream-50 p-5"><h3 className="font-extrabold text-coffee-800">Export a backup</h3><p className="flex-1 text-sm leading-relaxed text-coffee-500">Save a consistent SQLite copy to a USB drive or a folder you choose. Keep the file somewhere separate from this laptop.</p><button type="button" disabled={backupBusy} onClick={() => requireAdminPin('db:export', grant => { void handleExportBackup(grant.authorizationToken); })} className="flex min-h-12 items-center justify-center gap-2 self-start rounded-xl bg-coffee-700 px-5 text-sm font-extrabold text-white hover:bg-coffee-800 disabled:opacity-50"><Download className="h-4 w-4" />Export Database Backup</button></article>
                                 <article className="flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50/60 p-5"><h3 className="font-extrabold text-coffee-800">Restore a backup</h3><p className="flex-1 text-sm leading-relaxed text-coffee-500">Choose a verified CafePOS SQLite backup. The application will check the file before replacing local records, then reload for a fresh sign-in.</p><button type="button" disabled={backupBusy} onClick={() => setRestoreConfirmOpen(true)} className="flex min-h-12 items-center justify-center gap-2 self-start rounded-xl border border-amber-300 bg-white px-5 text-sm font-extrabold text-amber-900 hover:bg-amber-100 disabled:opacity-50"><Upload className="h-4 w-4" />Restore Database Backup</button></article>
                                 {(session.user.role === 'admin' || session.user.role === 'manager') && <article className="flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50/70 p-5 xl:col-span-2"><h3 className="font-extrabold text-red-900">Reset this terminal</h3><p className="flex-1 text-sm leading-relaxed text-red-800">Start over with a clean local setup. A full recovery backup is saved in the private app data <strong>backups</strong> folder before any live data is cleared. Restore it from this screen if needed.</p><button type="button" disabled={backupBusy} onClick={() => { setBackupNotice(null); setResetConfirmation(''); setResetConfirmOpen(true); }} className="flex min-h-12 items-center justify-center gap-2 self-start rounded-xl border border-red-300 bg-white px-5 text-sm font-extrabold text-red-800 hover:bg-red-100 disabled:opacity-50"><TriangleAlert className="h-4 w-4" />Create Recovery Backup &amp; Reset POS</button></article>}
                             </div>
@@ -608,14 +612,14 @@ export const SettingsPage: React.FC<Props> = ({ session, onSettingsUpdated, onFo
             <AdminPinModal
                 isOpen={adminPinOpen}
                 sessionToken={session.sessionToken}
-                scope="settings:write"
+                scope={adminPinScope}
                 title="Settings Change Authorization"
                 description="Verify an Admin or Manager PIN before saving system settings or changing the floor layout."
                 actionLabel="Authorize Settings Change"
-                onSuccess={() => {
+                onSuccess={grant => {
                     const action = pendingAdminAction.current;
                     pendingAdminAction.current = null;
-                    action?.();
+                    action?.(grant);
                 }}
                 onClose={() => setAdminPinOpen(false)}
             />

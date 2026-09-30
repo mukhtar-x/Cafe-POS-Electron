@@ -3,11 +3,82 @@ export interface Product {
     name: string;
     category: string;
     price: number;
-    stock: number;
+    sellable_stock?: number | null;
     cost_price?: number | null;
     variant?: string | null;
     available?: number;
-    low_stock_threshold?: number;
+}
+
+export type ProductInput = Omit<Product, 'id' | 'sellable_stock'>;
+
+export type RawIngredientUnitType = 'weight' | 'volume' | 'count';
+
+export interface RawIngredient {
+    id: number;
+    name: string;
+    unit_type: RawIngredientUnitType;
+    current_stock_base: number;
+    low_stock_threshold_base: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ProductRecipeInput {
+    ingredient_id: number;
+    unit_type: RawIngredientUnitType;
+    quantity_base_units: number;
+}
+
+export interface ProductRecipe extends ProductRecipeInput {
+    product_id: number;
+    ingredient_name: string;
+}
+
+export interface RecipeIngredientOption {
+    id: number;
+    name: string;
+    unit_type: RawIngredientUnitType;
+}
+
+export type InventoryMovementType = 'opening' | 'adjustment' | 'purchase' | 'sale' | 'void_restore';
+
+export interface InventoryMovement {
+    id: number;
+    ingredient_id: number | null;
+    ingredient_name: string;
+    unit_type: RawIngredientUnitType;
+    order_id: number | null;
+    movement_type: InventoryMovementType;
+    quantity_delta_base: number;
+    spend_minor: number;
+    currency: string;
+    supplier: string;
+    stock_before_base: number;
+    stock_after_base: number;
+    actor: string;
+    details: string;
+    created_at: string;
+}
+
+export interface RawInventoryPurchaseInput {
+    ingredient_id: number;
+    quantity_base_units: number;
+    amount_minor: number;
+    supplier: string;
+}
+
+export interface InventorySpendingSupplier {
+    supplier: string;
+    spend_minor: number;
+    purchase_count: number;
+}
+
+export interface InventorySpendingReport {
+    currency: string;
+    total_spend_minor: number;
+    estimated_cogs_minor: number;
+    cogs_complete: boolean;
+    supplier_spending: InventorySpendingSupplier[];
 }
 
 export interface CafeTable {
@@ -37,7 +108,7 @@ export interface OrderItemRecord {
 }
 
 export type OrderType = 'dine-in' | 'takeaway' | 'walk-in';
-export type KitchenOrderStatus = 'pending' | 'cooking' | 'ready';
+export type KitchenOrderStatus = 'pending' | 'cooking' | 'ready' | 'completed';
 
 export interface Order {
     id: number;

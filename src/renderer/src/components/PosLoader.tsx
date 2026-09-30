@@ -15,7 +15,7 @@ export const PosLoader: React.FC<PosLoaderProps> = ({
         <div role="status" aria-live="polite" aria-label={message} className={`flex items-center gap-3 rounded-2xl border border-cream-200 bg-white px-5 py-4 text-coffee-700 shadow-warm-sm ${className}`}>
             <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cream-100">
                 <span className="absolute inset-0 animate-spin rounded-xl border-2 border-coffee-200 border-t-coffee-700" />
-                <img src="/icon.png" alt="" className="h-7 w-7 rounded-lg object-cover" />
+                <img src={`${import.meta.env.BASE_URL}icon.png`} alt="" className="h-7 w-7 rounded-lg object-cover" />
             </span>
             <span className="text-sm font-semibold">{message}</span>
         </div>

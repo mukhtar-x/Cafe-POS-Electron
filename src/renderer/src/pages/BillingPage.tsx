@@ -153,14 +153,18 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
     }, [products, selectedCategory, searchQuery]);
 
     const addToCart = (p: Product) => {
-        if (p.stock !== undefined && p.stock <= 0) {
-            setOperationalNotice({ tone: 'error', message: `"${p.name}" is currently out of stock.` });
+        if (p.sellable_stock == null) {
+            setOperationalNotice({ tone: 'error', message: `"${p.name}" has no recipe yet. Ask an admin to configure raw ingredients.` });
+            return;
+        }
+        if (p.sellable_stock <= 0) {
+            setOperationalNotice({ tone: 'error', message: `"${p.name}" has insufficient recipe ingredients.` });
             return;
         }
         setCart((prev) => {
             const hit = prev.find((i) => i.product.id === p.id);
-            if (hit && p.stock !== undefined && hit.quantity >= p.stock) {
-                setOperationalNotice({ tone: 'error', message: `Cannot add more. Only ${p.stock} units available in stock.` });
+            if (hit && p.sellable_stock !== null && p.sellable_stock !== undefined && hit.quantity >= p.sellable_stock) {
+                setOperationalNotice({ tone: 'error', message: `Cannot add more. Current recipe capacity is ${p.sellable_stock} units.` });
                 return prev;
             }
             return hit
@@ -175,8 +179,8 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
                 .map((i) => {
                     if (i.product.id !== id) return i;
                     const nextQty = i.quantity + delta;
-                    if (delta > 0 && i.product.stock !== undefined && nextQty > i.product.stock) {
-                        setOperationalNotice({ tone: 'error', message: `Cannot exceed available inventory stock (${i.product.stock} units).` });
+                    if (delta > 0 && i.product.sellable_stock !== null && i.product.sellable_stock !== undefined && nextQty > i.product.sellable_stock) {
+                        setOperationalNotice({ tone: 'error', message: `Cannot exceed current recipe capacity (${i.product.sellable_stock} units).` });
                         return i;
                     }
                     return { ...i, quantity: nextQty };
@@ -211,6 +215,7 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
             operator: session.user.displayName || session.user.username,
             cashier_id: session.user.username,
             server_name: serverName.trim() || session.user.displayName || session.user.username,
+            order_uuid: crypto.randomUUID(),
             items_json: JSON.stringify(
                 cart.map((i) => ({
                     id: i.product.id,
@@ -355,8 +360,10 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
                         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5 content-start">
                             {filtered.map((product) => {
                                 const inCart = cart.find((i) => i.product.id === product.id);
-                                const isOutOfStock = product.stock !== undefined && product.stock <= 0;
-                                const isLowStock = !isOutOfStock && product.stock !== undefined && product.stock <= 5;
+                                const isMissingRecipe = product.sellable_stock == null;
+                                const sellableStock = product.sellable_stock ?? 0;
+                                const isOutOfStock = isMissingRecipe || sellableStock <= 0;
+                                const isLowStock = !isOutOfStock && sellableStock <= 5;
                                 return (
                                     <button
                                         key={product.id}
@@ -373,7 +380,7 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
                                         {isOutOfStock && (
                                             <div className="absolute inset-0 flex items-center justify-center rounded-2xl">
                                                 <span className="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-black uppercase tracking-wider shadow rotate-[-8deg]">
-                                                    Out of Stock
+                                                    {isMissingRecipe ? 'Recipe Required' : 'Out of Stock'}
                                                 </span>
                                             </div>
                                         )}
@@ -395,7 +402,7 @@ export const BillingPage: React.FC<Props> = ({ session, activeTableId }) => {
                                                 </span>
                                                 {isLowStock && (
                                                     <span className="ml-1.5 text-[9px] font-black text-amber-600 dark:text-amber-400 uppercase bg-amber-100 dark:bg-amber-950/60 px-1.5 py-0.5 rounded-full">
-                                                        {product.stock} left
+                                                        {sellableStock} left
                                                     </span>
                                                 )}
                                             </div>

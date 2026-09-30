@@ -10,6 +10,7 @@ import { MenuManagementPage } from './pages/MenuManagementPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { RawInventoryPage } from './pages/RawInventoryPage';
 import { ShieldAlert } from 'lucide-react';
 
 const DEFAULT_SETTINGS: PosSettings = {
@@ -110,6 +111,10 @@ export default function App() {
             alert('Access Denied: Only Manager (admin) can access Settings.');
             return;
         }
+        if (tab === 'inventory' && session.user.role !== 'admin') {
+            alert('Access Denied: Raw material inventory is restricted to Admin accounts.');
+            return;
+        }
         setActiveTab(tab);
     };
 
@@ -152,6 +157,13 @@ export default function App() {
 
                 {/* Window 3: 📋 Menu & Pricing CRUD */}
                 {activeTab === 'menu' && <MenuManagementPage session={session} />}
+
+                {activeTab === 'inventory' && (session.user.role === 'admin' ? <RawInventoryPage session={session} /> : (
+                    <div className="flex flex-1 flex-col items-center justify-center bg-cream-100 p-8 text-center">
+                        <ShieldAlert className="mb-4 h-14 w-14 text-amber-600" />
+                        <h2 className="text-xl font-black text-coffee-800">Admin Authorization Required</h2>
+                    </div>
+                ))}
 
                 {/* Window 4: 📜 Past Receipt History & Re-print Logs */}
                 {activeTab === 'history' && (

@@ -97,7 +97,7 @@ export const ReceiptPreviewModal: React.FC<Props> = ({
                 {/* Modal Top Header with Token & Status */}
                 <div className="flex items-center justify-between border-b border-cream-200 dark:border-slate-700 bg-cream-50 dark:bg-slate-800/80 px-5 py-3.5">
                     <div className="flex items-center gap-3">
-                        <img src="/icon.png" alt="" className="h-9 w-9 shrink-0 rounded-xl object-cover shadow-warm" />
+                        <img src={`${import.meta.env.BASE_URL}icon.png`} alt="" className="h-9 w-9 shrink-0 rounded-xl object-cover shadow-warm" />
                         <div>
                             <div className="flex items-center gap-2">
                                 <h2 className="text-base font-black text-coffee-800 dark:text-slate-100">

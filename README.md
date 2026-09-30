@@ -26,11 +26,11 @@ The renderer never opens SQLite directly. It calls a typed API exposed by the El
 | Page | Main capabilities | Access |
 | --- | --- | --- |
 | Billing | Search the menu, build a cart, choose walk-in/dine-in/takeaway, select a table, assign a waiter/server, review the order, and save it. | Admin and cashier |
-| Kitchen | Monitor current-shift tickets, move orders through Pending/Cooking/Ready, undo one status step, and print chef tokens. | Admin and cashier |
+| Kitchen | Monitor current-shift tickets, move orders through Pending/Cooking/Ready, ship or serve Ready orders, undo one status step, and print chef tokens. | Admin and cashier |
 | Tables | View floor status, change table availability, and begin a dine-in order. | Admin and cashier |
-| Menu | Manage finished sellable products, prices, variants, stock, availability, and unit cost. Changes require an Admin PIN. | Signed-in staff; mutations require authorization |
+| Menu | Manage sellable products, prices, variants, required recipes, and optional unit cost. Changes require an Admin PIN. | Signed-in staff; mutations require authorization |
 | History | Search orders and tokens, inspect itemized receipts, preview customer receipts or chef tokens, print/export, and request a protected void. | Admin and cashier; void requires authorization |
-| Analytics | Sales and store performance, plus searchable employee sales, bill-count, average-bill, and dish comparisons. | Admin/manager |
+| Analytics | Sales, employee performance, inventory expenditure, supplier breakdowns, and estimated recipe COGS. | Admin/manager |
 | Settings | Café profile, printer, staff credentials, floor setup, shift handover, audit log, local backup/restore/reset, and restart. | Admin/manager |
 
 The interface also includes first-run setup and login, responsive tab navigation, a table picker, shared receipt preview framing, Admin PIN prompts, loading/error notifications, and a renderer error boundary.
@@ -38,12 +38,12 @@ The interface also includes first-run setup and login, responsive tab navigation
 ## Order and Waiter Workflow
 
 1. On sign-in, Billing loads products, tables, local settings, and local sales statistics through `window.api`.
-2. Staff build a cart and select an order channel. Dine-in orders require a table. Stock shown in the renderer is checked again by the database when the order is saved.
+2. Staff build a cart and select an order channel. Dine-in orders require a table. Recipe-derived sellable capacity is shown in the renderer; SQLite rechecks exact ingredient quantities when the order is saved.
 3. The **Waiter / Server** input defaults to the signed-in staff member’s display name. Staff can enter another name when a different floor server took the order.
 4. Billing calculates the subtotal and configured tax, then opens a preview. A draft has no database ID, does not reserve a token, and does not change inventory.
-5. Saving sends the order through the preload bridge to the main-process `pos:createOrder` handler. SQLite validates the items, prices, table, and total, then atomically assigns the active-shift token, records the order and staff attribution, marks a dine-in table occupied, deducts stock, and writes an audit event.
+5. Saving sends the order through the preload bridge to the main-process `pos:createOrder` handler. SQLite validates the items, prices, table, total, and every recipe ingredient before issuing a token or inserting the order. It then atomically records the order and staff attribution, marks a dine-in table occupied, deducts recipe ingredient stock, and writes audit events. A missing recipe or raw-material shortage rejects the entire transaction.
 6. The signed-in cashier remains the authenticated operator for audit purposes. The selected waiter/server name is stored separately in the `orders.server_name` column and receipt snapshot; employee metrics use that assigned name.
-7. Voiding a saved order requires an Admin PIN grant. The order remains in history with its void status, inventory is restored, and an audit event is recorded. Discarding an unsaved draft is also authorized and audit-logged but does not affect inventory.
+7. Voiding a saved order requires an Admin PIN grant. The order remains in history with its void status, and the exact raw-material quantities recorded at checkout are restored atomically with audit events. Discarding an unsaved draft is also authorized and audit-logged but does not affect inventory.
 8. **Ready for Next Order** clears the draft and resets the waiter/server input to the signed-in employee.
 
 Tokens increment within the active shift and reset during shift handover, not at midnight. A draft’s `PREVIEW` token is not reserved. Guest headcounts are not captured or reported.
@@ -52,7 +52,7 @@ Tokens increment within the active shift and reset during shift handover, not at
 
 New saved orders enter the active local shift’s kitchen queue as `pending`. The Kitchen page refreshes the queue every three seconds and shows ticket time, token, channel/table, item names, variants, and quantities. Prices are omitted from the kitchen ticket.
 
-Allowed status changes are `pending → cooking`, `cooking → pending`, `cooking → ready`, and `ready → cooking`. The database validates each one-step change and logs it, so staff can undo an accidental transition without allowing skipped stages. Voided orders do not appear in the queue. Ready tickets remain visible; there is no separate served/cleared stage.
+Allowed status changes are `pending → cooking`, `cooking → pending`, `cooking → ready`, `ready → cooking`, and `ready → completed`. The database validates each transition and logs the actor and shift token. The **Ship / Serve** action moves a Ready order to `completed`, which remains in order history but is removed from the live kitchen queue. Voided and completed orders do not appear in the queue. Existing databases migrate their order status constraint at startup.
 
 ## History and Receipt Previews
 
@@ -67,7 +67,7 @@ PDF export is handled by Electron after validating the generated HTML and openin
 
 ## Analytics
 
-The Analytics page has shared Today, This Week, This Month, and Custom date-range controls. The selected range is sent to the main process for both sales and employee metrics; custom ranges are limited to one year. Data refreshes every 15 seconds and can be refreshed manually.
+The Analytics page has shared Today, This Week, This Month, and Custom date-range controls. The selected range is sent to the main process for sales, employee metrics, and inventory spending; custom ranges are limited to one year. Data refreshes every 15 seconds and can be refreshed manually. Inventory Spending reports integer-minor-unit purchases, supplier totals, and estimated recipe COGS using weighted-average purchase costs. COGS is marked incomplete when consumed stock has no recorded purchase-cost history.
 
 **Sales Analytics** includes total sales, bills issued, average bill, gross profit, occupied tables, order-channel breakdowns, and best sellers. **Employee Sales Analytics** includes a name/ID search and responsive employee cards. Each card compares sales volume, bill count, and average bill with progress bars, lists channel and gross-profit values, and ranks that employee’s top dishes. The desktop layout shows three employee cards per row; it collapses to fewer columns on narrower screens.
 
@@ -77,19 +77,21 @@ Audit records are stored in SQLite and viewable from Settings. Main-process diag
 
 ## Products and Inventory
 
-The `products` table tracks finished sellable goods, not raw ingredients. Product records include name, category, sale price, optional unit cost, integer stock, optional variant, availability, and a low-stock threshold. Checkout deducts sold units in the same transaction as order creation; a successful void restores them.
+The `products` table stores sellable product details, not finished-item inventory. Each sellable product must have a Bill of Materials (BOM). Its displayed capacity is derived from the limiting raw ingredient; no-recipe products cannot be sold. Countable packaged items use a raw ingredient with unit family `count` and recipe usage of one `each` per sellable unit. Raw materials are managed in the Admin-only Inventory view and use integer grams, milliliters, or each for stock, thresholds, and recipe usage; kg/L entry values are converted exactly to integer base units.
+
+Checkout aggregates recipe requirements across the order and verifies every ingredient before issuing a token or inserting the order. Deductions and order writes share one immediate SQLite transaction; if any ingredient is short, the entire checkout rolls back. Every opening balance, manual stock adjustment, purchase, sale deduction, and void restoration is kept in the inventory movement ledger with stock snapshots and audit records. Purchase costs use integer minor currency units and optionally record a supplier. Ingredients referenced by recipes or unvoided orders cannot be deleted.
 
 A new database is seeded with sample café products, ten tables, `Rs.` currency, an 8% tax rate, and default local settings. Existing menu and settings data are retained during normal startup migrations.
 
-There is no raw-material/recipe (BOM), ingredient-consumption, supplier, purchase-order, or waste-management system. Costs are optional; historical profit cannot be reconstructed for items that were saved without cost data.
+Supplier spending is summarized from recorded replenishment purchases; purchase orders and waste-management workflows are not implemented. Historical COGS cannot be reconstructed for sales of ingredients without recorded purchase-cost history.
 
 ## Accounts and Security
 
 - First-run setup creates the initial admin account; there are no built-in default credentials. Admins can create cashier accounts with a username, display name, and PIN/password.
 - Credentials are salted and hashed with Node’s `scrypt`. Sessions are held in the Electron main process and bound to the originating renderer window.
 - The shared role type includes `manager`, but SQLite currently permits persisted `admin` and `cashier` accounts. The initial manager/operator account is stored as `admin`.
-- Analytics, Settings, shift handover, backup, restore, and reset are protected by main-process role checks as well as UI visibility.
-- Menu mutations and order voids use short-lived, one-use Admin PIN grants scoped to the requested action and current session/window. The main process consumes each grant before applying the mutation. Renderer-supplied actor names are not trusted for privileged operations.
+- Analytics, Settings, raw-material inventory, shift handover, backup, restore, and reset are protected by main-process role checks as well as UI visibility.
+- Menu/BOM mutations, raw-material mutations, and order voids use short-lived, one-use Admin PIN grants scoped to the requested action and current session/window. The main process consumes each grant before applying the mutation. Renderer-supplied actor names are not trusted for privileged operations.
 - Failed PIN attempts are audit-logged and rate-limited. Grant acceptance/rejection, checkout, voids, menu changes, shift handovers, and kitchen status transitions are also recorded.
 - Electron enables context isolation and disables Node integration in the renderer. The preload bridge exposes only the typed POS API.
 
@@ -97,7 +99,7 @@ There is no raw-material/recipe (BOM), ingredient-consumption, supplier, purchas
 
 The live SQLite file is `pos_production.db` in Electron’s per-user application-data directory. If that file does not exist but the older `cafe_pos.sqlite` file does, startup migrates the legacy file. When Electron’s `userData` path is unavailable in CLI tooling, the database module falls back to `<current-working-directory>/data`.
 
-SQLite uses WAL mode, `synchronous=NORMAL`, foreign keys, and a five-second busy timeout. The main schema covers products, auth users, tables, orders, settings, shifts, the active shift, and audit logs; a legacy token tracker may remain in upgraded databases. Migrations preserve order history, add current order fields such as waiter/server attribution, and remove legacy counter/sync/guest-count data.
+SQLite uses WAL mode, `synchronous=NORMAL`, foreign keys, and a five-second busy timeout. The main schema covers products, raw ingredients, product recipes, inventory movements, auth users, tables, orders, settings, shifts, the active shift, and audit logs. Migrations preserve order history, remove direct product-stock columns and the obsolete daily token tracker, and remove legacy counter/sync/guest-count data.
 
 Each device operates independently on its own local database. There is no LAN sync server, peer discovery, order forwarding, or automatic reconciliation. Moving data between devices is a manual backup/restore operation.
 

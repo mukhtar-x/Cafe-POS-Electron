@@ -2,10 +2,10 @@ import React from 'react';
 import { AuthSession, can } from '../../../types/auth';
 import {
     Zap, Armchair, ClipboardList, ScrollText, BarChart3,
-    Settings, LogOut, Shield, User, Sun, Moon, ChefHat
+    Settings, LogOut, Shield, User, Sun, Moon, ChefHat, Package
 } from 'lucide-react';
 
-export type TabId = 'billing' | 'kitchen' | 'tables' | 'menu' | 'history' | 'analytics' | 'settings';
+export type TabId = 'billing' | 'kitchen' | 'tables' | 'menu' | 'inventory' | 'history' | 'analytics' | 'settings';
 
 interface Tab {
     id: TabId;
@@ -19,6 +19,7 @@ const TABS: Tab[] = [
     { id: 'kitchen', label: 'Kitchen', icon: <ChefHat className="w-4 h-4" />, adminOnly: false },
     { id: 'tables', label: 'Tables', icon: <Armchair className="w-4 h-4" />, adminOnly: false },
     { id: 'menu', label: 'Menu', icon: <ClipboardList className="w-4 h-4" />, adminOnly: false },
+    { id: 'inventory', label: 'Inventory', icon: <Package className="w-4 h-4" />, adminOnly: true },
     { id: 'history', label: 'History', icon: <ScrollText className="w-4 h-4" />, adminOnly: false },
     { id: 'analytics', label: 'Analytics', icon: <BarChart3 className="w-4 h-4" />, adminOnly: true },
     { id: 'settings', label: 'Settings', icon: <Settings className="w-4 h-4" />, adminOnly: true },
@@ -50,7 +51,7 @@ export const TabNav: React.FC<Props> = ({
         <header className="h-16 bg-white dark:bg-slate-900 border-b-2 border-cream-200 dark:border-slate-800 flex items-center justify-between gap-2 px-3 md:px-4 xl:px-6 shrink-0 shadow-warm-sm z-30 transition-colors">
             {/* ── Brand ──────────────────────────────────────────────────────────── */}
             <div className="flex items-center gap-3 shrink-0">
-                <img src="/icon.png" alt="" className="h-9 w-9 shrink-0 rounded-xl object-cover shadow-warm" />
+                <img src={`${import.meta.env.BASE_URL}icon.png`} alt="" className="h-9 w-9 shrink-0 rounded-xl object-cover shadow-warm" />
                 <div className="hidden sm:block">
                     <p className="text-sm font-black text-coffee-800 dark:text-slate-100 leading-none tracking-tight">
                         {cafeName || 'Cafe POS'}
@@ -65,7 +66,7 @@ export const TabNav: React.FC<Props> = ({
             <nav className="flex-1 min-w-0 mx-1 xl:mx-4 py-1 overflow-x-auto no-scrollbar" aria-label="Main navigation">
                 <div className="mx-auto flex w-max items-center gap-1 xl:gap-1.5">
                     {TABS.map((tab) => {
-                        const locked = tab.adminOnly && !isAdmin;
+                        const locked = tab.id === 'inventory' ? user.role !== 'admin' : tab.adminOnly && !isAdmin;
                         const isActive = activeTab === tab.id;
 
                         return (

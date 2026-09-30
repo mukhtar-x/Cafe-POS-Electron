@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Printer, Download, FileDown } from 'lucide-react';
 import { Order, OrderItemRecord } from '../../../types/pos';
 import { ReceiptPreviewLayout } from './ReceiptPreviewLayout';
+import { SlipCanvas, canvasToPngDownload, canvasToPdfBlob, downloadBlob } from './receiptExport';
 
 interface Props {
     order: Order;
@@ -49,38 +50,33 @@ export const ChefTokenPreview: React.FC<Props> = ({
     const server = receiptDetails.server_name?.trim() || receiptDetails.cashier || 'Staff';
     const totalItemCount = items.reduce((sum, item) => sum + item.quantity, 0);
 
-    const inlineComputedStyles = (source: HTMLElement, target: HTMLElement): void => {
-        const computed = window.getComputedStyle(source);
-        for (let index = 0; index < computed.length; index += 1) {
-            const property = computed.item(index);
-            target.style.setProperty(property, computed.getPropertyValue(property), computed.getPropertyPriority(property));
+    const renderChefCanvas = (): HTMLCanvasElement => {
+        const slip = new SlipCanvas();
+        slip.text('*** KITCHEN ORDER TICKET ***', { size: 17, bold: true, align: 'center' });
+        slip.text(`TOKEN #${token}`, { size: 34, bold: true, align: 'center' });
+        slip.text(order.type === 'walk-in' ? 'WALK-IN' : order.type === 'dine-in' ? 'DINE-IN' : 'TAKEAWAY', { size: 17, bold: true, align: 'center' });
+        if (order.table_no) slip.text(`TABLE: ${order.table_no}`, { size: 16, bold: true, align: 'center' });
+        slip.divider('solid');
+        slip.itemRow(`Date: ${dateFormatted}`, `Time: ${timeFormatted}`, null, { size: 13, qtyX: slip.right });
+        slip.itemRow(`Server: ${server}`, order.id > 0 ? `Order #${order.id}` : 'DRAFT PREVIEW', null, { size: 13, qtyX: slip.right });
+        slip.divider('solid');
+        slip.itemRow('ITEM DESCRIPTION', 'QTY', null, { size: 14, bold: true });
+        slip.divider('solid');
+        for (const item of items) {
+            slip.text(`${item.quantity}x  ${item.name}${item.variant ? ` (${item.variant})` : ''}`, { size: 17, bold: true });
+            const notes = (item as any).notes;
+            if (notes) slip.text(`Note: ${String(notes)}`, { size: 13 });
+            slip.space(4);
         }
-        target.style.animation = 'none';
-        target.style.transition = 'none';
-        Array.from(source.children).forEach((child, index) => {
-            const targetChild = target.children[index];
-            if (child instanceof HTMLElement && targetChild instanceof HTMLElement) inlineComputedStyles(child, targetChild);
-        });
-    };
-
-    const makeExportDocument = (): { html: string; heightMm: number } | null => {
-        const source = tokenRef.current;
-        if (!source) return null;
-        const heightMm = Math.max(75, Math.ceil((source.getBoundingClientRect().height * 25.4) / 96 + 4));
-        const clone = source.cloneNode(true) as HTMLElement;
-        inlineComputedStyles(source, clone);
-        clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
-        clone.style.width = '80mm';
-        clone.style.maxWidth = '80mm';
-        clone.style.margin = '0';
-        clone.style.boxShadow = 'none';
-        const html = `<!doctype html><html><head><meta charset="utf-8"><style>@page{size:80mm ${heightMm}mm;margin:0}html,body{margin:0;padding:0;width:80mm;background:#fff}body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-print-color-adjust:exact;print-color-adjust:exact}</style></head><body>${clone.outerHTML}</body></html>`;
-        return { html, heightMm };
+        slip.divider('solid');
+        slip.text(`TOTAL ITEMS TO COOK: ${totalItemCount}`, { size: 15, bold: true, align: 'center' });
+        return slip.render();
     };
 
     const handlePrint = async () => {
         if (order.id <= 0) {
-            setPrintNotice({ message: 'Save the order before sending a chef token to the kitchen.', success: false });
+            setPrintNotice({ message: 'Printing draft preview. This does not send an order to the kitchen queue.', success: true });
+            window.print();
             return;
         }
         if (onPrint) {
@@ -107,12 +103,8 @@ export const ChefTokenPreview: React.FC<Props> = ({
         setExporting('pdf');
         setExportNotice('');
         try {
-            const rendered = makeExportDocument();
-            if (!rendered) throw new Error('Chef token preview is not ready.');
-            if (!window.api) throw new Error('PDF export requires the installed desktop application.');
-            const result = await window.api.exportReceiptPdf(rendered.html, order.token_no, rendered.heightMm, sessionToken, 'chef-token');
-            if (!result.success && !result.canceled) throw new Error(result.error || 'Could not save the chef token PDF.');
-            if (result.success) setExportNotice('Chef token PDF saved.');
+            downloadBlob(canvasToPdfBlob(renderChefCanvas(), 80), `Chef_Token_${token}.pdf`);
+            setExportNotice('Chef token PDF saved.');
         } catch (error) { setExportNotice(error instanceof Error ? error.message : 'Could not save the chef token PDF.'); }
         finally { setExporting(null); }
     };
@@ -121,71 +113,8 @@ export const ChefTokenPreview: React.FC<Props> = ({
         setExporting('image');
         setExportNotice('');
         try {
-            const width = 640;
-            const left = 24;
-            const right = width - left;
-            const markup: string[] = [`<rect width="${width}" height="100%" fill="#fff"/>`];
-            let y = 44;
-            const escapeXml = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
-            const addText = (value: string, size: number, bold = false, center = false, maxChars = 48) => {
-                const lines: string[] = [];
-                let line = '';
-                for (const word of value.split(/\s+/)) {
-                    const candidate = line ? `${line} ${word}` : word;
-                    if (candidate.length > maxChars && line) { lines.push(line); line = word; }
-                    else line = candidate;
-                }
-                if (line) lines.push(line);
-                for (const part of lines) {
-                    markup.push(`<text x="${center ? width / 2 : left}" y="${y}" text-anchor="${center ? 'middle' : 'start'}" font-family="monospace" font-size="${size}" font-weight="${bold ? 700 : 400}" fill="#111">${escapeXml(part)}</text>`);
-                    y += Math.ceil(size * 1.45);
-                }
-            };
-            const divider = () => { y += 8; markup.push(`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#111" stroke-width="2"/>`); y += 20; };
-
-            addText('*** KITCHEN ORDER TICKET ***', 17, true, true);
-            addText(`TOKEN #${token}`, 34, true, true);
-            addText(order.type === 'walk-in' ? 'WALK-IN' : order.type === 'dine-in' ? 'DINE-IN' : 'TAKEAWAY', 17, true, true);
-            if (order.table_no) addText(`TABLE: ${order.table_no}`, 16, true, true);
-            divider();
-            addText(`Date: ${dateFormatted}    Time: ${timeFormatted}`, 13);
-            addText(`Server: ${server}    ${order.id > 0 ? `Order #${order.id}` : 'DRAFT PREVIEW'}`, 13);
-            divider();
-            addText('QTY     ITEM DESCRIPTION', 14, true);
-            divider();
-            for (const item of items) {
-                addText(`${item.quantity}x   ${item.name}${item.variant ? ` (${item.variant})` : ''}`, 17, true);
-                const notes = (item as any).notes;
-                if (notes) addText(`Note: ${String(notes)}`, 13);
-            }
-            divider();
-            addText(`TOTAL ITEMS TO COOK: ${totalItemCount}`, 15, true, true);
-            y += 12;
-            markup.splice(1, 0, `<rect x="12" y="12" width="${width - 24}" height="${y - 24}" fill="none" stroke="#999" stroke-width="2" stroke-dasharray="8 6"/>`);
-            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${y}" viewBox="0 0 ${width} ${y}">${markup.join('')}</svg>`;
-            const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
-            try {
-                const image = new Image();
-                await new Promise<void>((resolve, reject) => {
-                    image.onload = () => resolve();
-                    image.onerror = () => reject(new Error('Could not render the chef token image.'));
-                    image.src = url;
-                });
-                const canvas = document.createElement('canvas');
-                canvas.width = width * 2;
-                canvas.height = y * 2;
-                const context = canvas.getContext('2d');
-                if (!context) throw new Error('Image export is unavailable on this device.');
-                context.fillStyle = '#fff';
-                context.fillRect(0, 0, canvas.width, canvas.height);
-                context.scale(2, 2);
-                context.drawImage(image, 0, 0);
-                const link = document.createElement('a');
-                link.download = `Chef_Token_${token}.png`;
-                link.href = canvas.toDataURL('image/png');
-                link.click();
-                setExportNotice('Chef token image downloaded.');
-            } finally { URL.revokeObjectURL(url); }
+            canvasToPngDownload(renderChefCanvas(), `Chef_Token_${token}.png`);
+            setExportNotice('Chef token image downloaded.');
         } catch (error) { setExportNotice(error instanceof Error ? error.message : 'Could not download the chef token image.'); }
         finally { setExporting(null); }
     };
@@ -202,13 +131,13 @@ export const ChefTokenPreview: React.FC<Props> = ({
             actions={<>
                 <button type="button" disabled={exporting !== null} onClick={() => void downloadPdf()} className="flex min-h-11 items-center gap-2 rounded-xl border border-cream-300 bg-white px-3 text-xs font-bold text-coffee-800 hover:bg-cream-50 disabled:opacity-50"><FileDown className="h-4 w-4" />{exporting === 'pdf' ? 'Saving...' : 'Download PDF'}</button>
                 <button type="button" disabled={exporting !== null} onClick={() => void downloadImage()} className="flex min-h-11 items-center gap-2 rounded-xl border border-cream-300 bg-white px-3 text-xs font-bold text-coffee-800 hover:bg-cream-50 disabled:opacity-50"><Download className="h-4 w-4" />{exporting === 'image' ? 'Preparing...' : 'Download Image'}</button>
-                <button type="button" onClick={() => void handlePrint()} disabled={printing || order.id <= 0} title={order.id <= 0 ? 'Save the order before printing' : 'Print chef token'} className="flex min-h-11 items-center gap-2 rounded-xl bg-coffee-700 px-4 text-xs font-extrabold text-white hover:bg-coffee-800 disabled:opacity-50"><Printer className="h-4 w-4" />{printing ? 'Printing...' : 'Print'}</button>
+                <button type="button" onClick={() => void handlePrint()} disabled={printing} title={order.id <= 0 ? 'Print draft preview only; not sent to the kitchen' : 'Print chef token'} className="flex min-h-11 items-center gap-2 rounded-xl bg-coffee-700 px-4 text-xs font-extrabold text-white hover:bg-coffee-800 disabled:opacity-50"><Printer className="h-4 w-4" />{printing ? 'Printing...' : order.id <= 0 ? 'Print Preview' : 'Print'}</button>
                 {onVoid && !order.voided_at && <button type="button" onClick={onVoid} className="flex min-h-11 items-center rounded-xl border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-700 hover:bg-red-100">Void</button>}
             </>}
         >
             <div
                 ref={tokenRef}
-                className="w-[302px] max-w-full bg-white dark:bg-white text-black dark:text-black p-4 font-mono text-xs shadow-sm border-2 border-dashed border-gray-300 dark:border-gray-600 select-text"
+                className="kitchen-ticket-printable w-[302px] max-w-full bg-white dark:bg-white text-black dark:text-black p-4 font-mono text-xs shadow-sm select-text"
                 style={{ letterSpacing: '0.02em' }}
             >
                 {/* Header */}

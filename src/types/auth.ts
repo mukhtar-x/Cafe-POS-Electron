@@ -12,7 +12,7 @@ export interface AuthSession {
     sessionToken: string;
 }
 
-export type AdminOverrideScope = 'order:void' | 'menu:add' | 'menu:update' | 'menu:delete' | 'settings:write';
+export type AdminOverrideScope = 'order:void' | 'menu:add' | 'menu:update' | 'menu:delete' | 'inventory:write' | 'settings:write' | 'shift:handover' | 'db:export' | 'db:restore' | 'db:reset' | 'app:restart';
 
 export interface AdminOverrideGrant {
     authorizationToken: string;

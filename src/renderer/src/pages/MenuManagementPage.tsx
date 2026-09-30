@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Product } from '../../../types/pos';
+import { Product, ProductRecipeInput, RecipeIngredientOption } from '../../../types/pos';
 import { AdminOverrideGrant, AdminOverrideScope, AuthSession } from '../../../types/auth';
 import { PosLoader } from '../components/PosLoader';
 import { PosToast } from '../components/PosToast';
@@ -14,8 +14,17 @@ interface Props {
     onMenuUpdated?: () => void;
 }
 
+interface RecipeDraft {
+    ingredientId: string;
+    quantityBaseUnits: string;
+}
+
 export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) => {
     const [products, setProducts] = useState<Product[]>([]);
+    const [recipeIngredients, setRecipeIngredients] = useState<RecipeIngredientOption[]>([]);
+    const [recipeIngredientsLoading, setRecipeIngredientsLoading] = useState(false);
+    const [recipeDrafts, setRecipeDrafts] = useState<RecipeDraft[]>([]);
+    const [recipesLoading, setRecipesLoading] = useState(false);
     const [loading, setLoading] = useState(false);
     const [search, setSearch] = useState('');
     const [selectedCategory, setSelectedCategory] = useState('All');
@@ -28,7 +37,6 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
         category: 'Chai & Hot Drinks',
         price: '',
         cost_price: '',
-        stock: '100',
         variant: '',
     });
     const [formError, setFormError] = useState('');
@@ -62,8 +70,22 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
         }
     };
 
+    const loadRecipeIngredients = async () => {
+        if (!window.api) return;
+        setRecipeIngredientsLoading(true);
+        try {
+            const result = await window.api.getRecipeIngredientOptions(session.sessionToken);
+            if (result.success && result.data) setRecipeIngredients(result.data);
+        } catch (error) {
+            console.error('Failed to load recipe ingredients:', error);
+        } finally {
+            setRecipeIngredientsLoading(false);
+        }
+    };
+
     useEffect(() => {
         loadProducts();
+        void loadRecipeIngredients();
     }, []);
 
     const categories = useMemo(() => {
@@ -88,11 +110,13 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                 category: categories[1] || 'Chai & Hot Drinks',
                 price: '',
                 cost_price: '',
-                stock: '100',
                 variant: '',
             });
+            setRecipeDrafts([]);
+            setRecipesLoading(false);
             setFormError('');
             setIsModalOpen(true);
+            void loadRecipeIngredients();
         });
     };
 
@@ -105,11 +129,24 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                 category: product.category,
                 price: String(product.price),
                 cost_price: product.cost_price == null ? '' : String(product.cost_price),
-                stock: String(product.stock),
                 variant: product.variant || '',
             });
+            setRecipeDrafts([]);
+            setRecipesLoading(true);
             setFormError('');
             setIsModalOpen(true);
+            void loadRecipeIngredients();
+            if (window.api) {
+                void window.api.getProductRecipes(product.id, session.sessionToken)
+                    .then(result => {
+                        if (!result.success || !result.data) throw new Error(result.error || 'Could not load this product recipe.');
+                        setRecipeDrafts(result.data.map(recipe => ({ ingredientId: String(recipe.ingredient_id), quantityBaseUnits: String(recipe.quantity_base_units) })));
+                    })
+                    .catch(error => setFormError(error instanceof Error ? error.message : 'Could not load this product recipe.'))
+                    .finally(() => setRecipesLoading(false));
+            } else {
+                setRecipesLoading(false);
+            }
         });
     };
 
@@ -129,8 +166,26 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
             setFormError('Cost price must be zero or greater, or left blank when unknown.');
             return;
         }
-        const stockNum = parseInt(formData.stock, 10);
         if (!adminGrant) { setFormError('Admin authorization expired. Reopen this action and verify the PIN again.'); return; }
+        if (recipesLoading) { setFormError('Wait for the current recipe to finish loading.'); return; }
+        const recipes: ProductRecipeInput[] = [];
+        const seenIngredientIds = new Set<number>();
+        for (const draft of recipeDrafts) {
+            const ingredientId = Number(draft.ingredientId);
+            const quantityBaseUnits = Number(draft.quantityBaseUnits);
+            const ingredient = recipeIngredients.find(option => option.id === ingredientId);
+            if (!ingredient || !Number.isSafeInteger(quantityBaseUnits) || quantityBaseUnits < 1) {
+                setFormError('Each recipe row needs an ingredient and a whole-number quantity greater than zero.');
+                return;
+            }
+            if (seenIngredientIds.has(ingredientId)) {
+                setFormError('Each raw ingredient can only appear once in a recipe. Combine its quantities into one row.');
+                return;
+            }
+            seenIngredientIds.add(ingredientId);
+            recipes.push({ ingredient_id: ingredientId, unit_type: ingredient.unit_type, quantity_base_units: quantityBaseUnits });
+        }
+        if (recipes.length === 0) { setFormError('Add at least one raw ingredient to the recipe before saving.'); return; }
 
         try {
             if (editingProduct) {
@@ -141,9 +196,8 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                         category: formData.category,
                         price: priceNum,
                         cost_price: costPrice,
-                        stock: isNaN(stockNum) ? 100 : stockNum,
                         variant: formData.variant.trim() || null,
-                    }, adminGrant.authorizationToken, session.sessionToken);
+                    }, recipes, adminGrant.authorizationToken, session.sessionToken);
                     if (!result.success) throw new Error(result.error || 'Could not update menu item.');
                 } else {
                     throw new Error('Menu management is available only in the desktop app.');
@@ -156,9 +210,8 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                         category: formData.category,
                         price: priceNum,
                         cost_price: costPrice,
-                        stock: isNaN(stockNum) ? 100 : stockNum,
                         variant: formData.variant.trim() || null,
-                    }, adminGrant.authorizationToken, session.sessionToken);
+                    }, recipes, adminGrant.authorizationToken, session.sessionToken);
                     if (!result.success) throw new Error(result.error || 'Could not add menu item.');
                 } else {
                     throw new Error('Menu management is available only in the desktop app.');
@@ -204,8 +257,8 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                         <ClipboardList className="w-7 h-7" />
                     </div>
                     <div>
-                        <h1 className="text-2xl font-black text-coffee-800 tracking-tight">Menu & Finished Product Stock</h1>
-                        <p className="text-sm text-coffee-400 mt-0.5">Manage sellable products, unit stock, prices, and optional unit cost for profit reports.</p>
+                        <h1 className="text-2xl font-black text-coffee-800 tracking-tight">Menu & Recipes</h1>
+                        <p className="text-sm text-coffee-400 mt-0.5">Manage sellable products and the raw ingredients consumed by each recipe.</p>
                     </div>
                 </div>
 
@@ -264,8 +317,8 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                 key={cat}
                                 onClick={() => setSelectedCategory(cat)}
                                 className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all flex items-center gap-2 ${isSelected
-                                        ? 'bg-coffee-700 text-white shadow-warm'
-                                        : 'bg-cream-50 hover:bg-cream-100 text-coffee-600 border border-cream-200'
+                                    ? 'bg-coffee-700 text-white shadow-warm'
+                                    : 'bg-cream-50 hover:bg-cream-100 text-coffee-600 border border-cream-200'
                                     }`}
                             >
                                 <span>{cat}</span>
@@ -289,14 +342,14 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                 <th className="py-2.5 px-4">Category</th>
                                 <th className="py-2.5 px-4">Price (PKR)</th>
                                 <th className="py-2.5 px-4">Unit Cost</th>
-                                <th className="py-2.5 px-4">Stock Level</th>
+                                <th className="py-2.5 px-4">Recipe Capacity</th>
                                 <th className="py-4 px-6 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-cream-100 text-sm">
                             {filteredProducts.length === 0 ? (
                                 <tr>
-                                    <td colSpan={6} className="py-12 text-center text-coffee-400">
+                                    <td colSpan={5} className="py-12 text-center text-coffee-400">
                                         No menu items found matching "{search}".
                                     </td>
                                 </tr>
@@ -318,12 +371,10 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                             {product.cost_price == null ? 'Not set' : `Rs. ${product.cost_price.toFixed(0)}`}
                                         </td>
                                         <td className="py-2 px-4 font-medium text-coffee-600">
-                                            <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${product.stock <= 20 ? 'text-amber-700' : 'text-emerald-700'
-                                                }`}>
-                                                <span className={`w-2 h-2 rounded-full ${product.stock <= 20 ? 'bg-amber-500' : 'bg-emerald-500'
-                                                    }`} />
-                                                {product.stock} available
-                                            </span>
+                                            {product.sellable_stock == null ? <span className="text-xs font-semibold text-red-600">Recipe required</span> : <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${product.sellable_stock <= 5 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                                <span className={`h-2 w-2 rounded-full ${product.sellable_stock <= 5 ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                                                {product.sellable_stock} available
+                                            </span>}
                                         </td>
                                         <td className="py-2 px-4 text-right">
                                             <div className="flex items-center justify-end gap-2">
@@ -408,7 +459,35 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                 <input type="text" maxLength={40} placeholder="e.g. 250 ml, 1 Litre, 1 Pound" value={formData.variant} onChange={e => setFormData({ ...formData, variant: e.target.value })} className="cafe-input" />
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
+                            <section className="space-y-3 rounded-xl border border-cream-300 bg-white p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h3 className="text-xs font-black uppercase text-coffee-700">Recipe / Bill of Materials</h3>
+                                        <p className="mt-1 text-[11px] font-medium text-coffee-400">Required raw-material usage per one sellable unit.</p>
+                                    </div>
+                                    <button type="button" disabled={recipeIngredientsLoading || recipeIngredients.length === 0} onClick={() => setRecipeDrafts([...recipeDrafts, { ingredientId: '', quantityBaseUnits: '' }])} className="flex shrink-0 items-center gap-1 rounded-lg border border-cream-300 px-3 py-2 text-xs font-bold text-coffee-700 hover:bg-cream-100 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />Add line</button>
+                                </div>
+                                {recipesLoading && <p className="text-xs font-semibold text-coffee-500">Loading recipe...</p>}
+                                {!recipeIngredientsLoading && recipeIngredients.length === 0 && <p className="rounded-lg bg-cream-100 p-3 text-xs font-medium text-coffee-500">Add raw materials in the Inventory tab before saving this sellable item.</p>}
+                                {!recipesLoading && recipeDrafts.map((draft, index) => {
+                                    const selectedIngredient = recipeIngredients.find(ingredient => ingredient.id === Number(draft.ingredientId));
+                                    const recipeUnit = selectedIngredient?.unit_type === 'weight' ? 'g' : selectedIngredient?.unit_type === 'volume' ? 'mL' : selectedIngredient?.unit_type === 'count' ? 'each' : 'base units';
+                                    return <div key={`${index}-${draft.ingredientId}`} className="grid grid-cols-[minmax(0,1fr)_minmax(7rem,0.65fr)_2.5rem] items-end gap-2">
+                                        <label className="min-w-0 text-[10px] font-bold uppercase text-coffee-500">Ingredient
+                                            <select value={draft.ingredientId} onChange={event => setRecipeDrafts(recipeDrafts.map((line, lineIndex) => lineIndex === index ? { ...line, ingredientId: event.target.value } : line))} className="cafe-input mt-1 text-xs normal-case" required>
+                                                <option value="">Select ingredient</option>
+                                                {recipeIngredients.map(ingredient => <option key={ingredient.id} value={ingredient.id}>{ingredient.name} ({ingredient.unit_type === 'weight' ? 'g' : ingredient.unit_type === 'volume' ? 'mL' : 'each'})</option>)}
+                                            </select>
+                                        </label>
+                                        <label className="min-w-0 text-[10px] font-bold uppercase text-coffee-500">Usage / unit ({recipeUnit})
+                                            <input type="number" min="1" step="1" required value={draft.quantityBaseUnits} onChange={event => setRecipeDrafts(recipeDrafts.map((line, lineIndex) => lineIndex === index ? { ...line, quantityBaseUnits: event.target.value } : line))} className="cafe-input mt-1 text-xs normal-case" placeholder="e.g. 18" />
+                                        </label>
+                                        <button type="button" title="Remove recipe line" aria-label="Remove recipe line" onClick={() => setRecipeDrafts(recipeDrafts.filter((_, lineIndex) => lineIndex !== index))} className="mb-0.5 flex h-10 w-10 items-center justify-center rounded-lg bg-red-50 text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /></button>
+                                    </div>;
+                                })}
+                            </section>
+
+                            <div>
                                 <div>
                                     <label className="block text-xs font-bold text-coffee-600 uppercase tracking-wider mb-1.5">
                                         Price (PKR / Rs.)
@@ -421,21 +500,6 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                         placeholder="e.g. 150"
                                         value={formData.price}
                                         onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                                        className="cafe-input"
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="block text-xs font-bold text-coffee-600 uppercase tracking-wider mb-1.5">
-                                        Stock Inventory
-                                    </label>
-                                    <input
-                                        type="number"
-                                        step="1"
-                                        min="0"
-                                        placeholder="e.g. 100"
-                                        value={formData.stock}
-                                        onChange={(e) => setFormData({ ...formData, stock: e.target.value })}
                                         className="cafe-input"
                                     />
                                 </div>
@@ -457,6 +521,7 @@ export const MenuManagementPage: React.FC<Props> = ({ session, onMenuUpdated }) 
                                 </button>
                                 <button
                                     type="submit"
+                                    disabled={recipesLoading}
                                     className="px-6 py-2.5 bg-coffee-700 hover:bg-coffee-800 text-white font-extrabold rounded-xl text-sm transition-colors shadow-warm flex items-center gap-2"
                                 >
                                     <Check className="w-4 h-4" />

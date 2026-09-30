@@ -74,7 +74,7 @@ export const LoginPage: React.FC<Props> = ({ onLogin, theme }) => {
             <div className="w-full max-w-md">
                 {/* ── Brand Header ───────────────────────────────────────────────── */}
                 <div className="text-center mb-8">
-                    <img src="/icon.png" alt="Chai Fusion Café logo" className="mx-auto mb-4 h-24 w-24 rounded-3xl object-cover shadow-warm-lg" />
+                    <img src={`${import.meta.env.BASE_URL}icon.png`} alt="Chai Fusion Café logo" className="mx-auto mb-4 h-24 w-24 rounded-3xl object-cover shadow-warm-lg" />
                     <h1 className="text-3xl font-black text-coffee-800 tracking-tight">
                         {cafeName}
                     </h1>

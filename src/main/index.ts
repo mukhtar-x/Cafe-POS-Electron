@@ -7,7 +7,7 @@ import { isIP } from 'net';
 import { initDatabase, dbDao, exportDatabaseBackup, restoreDatabaseBackup, resetApplicationData, flushDatabase } from './db/database';
 import { initializeLogIsolation } from './logger';
 import { printReceipt, printChefToken } from './printer/escpos';
-import { Product, Order, AnalyticsReport } from '../types/pos';
+import { ProductInput, Order, PosSettings, AnalyticsReport, ProductRecipeInput, RawIngredient, KitchenOrderStatus, RawInventoryPurchaseInput } from '../types/pos';
 
 export { initDatabase, dbDao, printReceipt, printChefToken };
 
@@ -106,7 +106,7 @@ const failedAdminPinAttempts = new Map<number, number[]>();
 const ADMIN_OVERRIDE_TTL_MS = 60_000;
 const ADMIN_PIN_WINDOW_MS = 60_000;
 const ADMIN_PIN_MAX_ATTEMPTS = 5;
-const ADMIN_OVERRIDE_SCOPES = new Set<AdminOverrideScope>(['order:void', 'menu:add', 'menu:update', 'menu:delete', 'settings:write']);
+const ADMIN_OVERRIDE_SCOPES = new Set<AdminOverrideScope>(['order:void', 'menu:add', 'menu:update', 'menu:delete', 'inventory:write', 'settings:write', 'shift:handover', 'db:export', 'db:restore', 'db:reset', 'app:restart']);
 
 function issueSession(event: IpcMainInvokeEvent, user: UserCredential): string {
     for (const [token, session] of mainSessions) {
@@ -167,6 +167,14 @@ function consumeAdminOverride(event: IpcMainInvokeEvent, sessionToken: string, a
 
 function boundedLimit(value: unknown, fallback = 20): number {
     return typeof value === "number" && Number.isInteger(value) && value >= 1 ? Math.min(value, 500) : fallback;
+}
+
+function validateAnalyticsDateRange(startDate: unknown, endDate: unknown): [string, string] {
+    const validDate = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value;
+    if (!validDate(startDate) || !validDate(endDate) || startDate > endDate) throw new Error('Choose a valid start and end date.');
+    const span = (Date.parse(endDate + 'T00:00:00Z') - Date.parse(startDate + 'T00:00:00Z')) / 86400000;
+    if (span > 366) throw new Error('Date ranges are limited to one year.');
+    return [startDate, endDate];
 }
 
 const MANAGER_ROLES: readonly UserCredential['role'][] = ['admin', 'manager'];
@@ -331,10 +339,10 @@ if (hasSingleInstanceLock && app && typeof app.whenReady === 'function') {
  * Register IPC handlers to handle renderer requests safely via contextBridge
  */
 function setupIpcHandlers() {
-    ipcMain.handle('db:export-backup', async (event, sessionToken: string) => {
+    ipcMain.handle('db:export-backup', async (event, authorizationToken: string, sessionToken: string) => {
         const finishOperation = beginCriticalOperation();
         try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
+            consumeAdminOverride(event, sessionToken, authorizationToken, 'db:export');
             const options = {
                 title: 'Export CafePOS database backup',
                 defaultPath: `CafePOS_Backup_${new Date().toISOString().slice(0, 10)}.sqlite`,
@@ -351,10 +359,10 @@ function setupIpcHandlers() {
         } finally { finishOperation(); }
     });
 
-    ipcMain.handle('db:reset-application', async (event, sessionToken: string) => {
+    ipcMain.handle('db:reset-application', async (event, authorizationToken: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
-            const backupPath = resetApplicationData(session.user.username);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'db:reset');
+            const backupPath = resetApplicationData(grant.adminUsername);
             mainSessions.clear();
             adminOverrideGrants.clear();
             failedAdminPinAttempts.clear();
@@ -365,10 +373,10 @@ function setupIpcHandlers() {
         }
     });
 
-    ipcMain.handle('db:restore-backup', async (event, sessionToken: string) => {
+    ipcMain.handle('db:restore-backup', async (event, authorizationToken: string, sessionToken: string) => {
         const finishOperation = beginCriticalOperation();
         try {
-            requireSession(event, sessionToken, MANAGER_ROLES);
+            consumeAdminOverride(event, sessionToken, authorizationToken, 'db:restore');
             const options = {
                 title: 'Choose a CafePOS database backup to restore',
                 properties: ['openFile'] as Array<'openFile'>,
@@ -388,8 +396,8 @@ function setupIpcHandlers() {
         } finally { finishOperation(); }
     });
 
-    ipcMain.handle('app:restart', (event, sessionToken: string) => {
-        try { requireSession(event, sessionToken, MANAGER_ROLES); app.relaunch({ execPath: process.execPath, args: process.argv.slice(1) }); app.exit(0); return { success: true }; }
+    ipcMain.handle('app:restart', (event, authorizationToken: string, sessionToken: string) => {
+        try { consumeAdminOverride(event, sessionToken, authorizationToken, 'app:restart'); app.relaunch({ execPath: process.execPath, args: process.argv.slice(1) }); app.exit(0); return { success: true }; }
         catch (err: any) { return { success: false, error: err instanceof Error ? err.message : 'Could not restart the application.' }; }
     });
 
@@ -497,12 +505,10 @@ function setupIpcHandlers() {
             return changed ? { success: true } : { success: false, error: 'Current PIN/password is incorrect.' };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
-    ipcMain.handle('auth:addCashier', (event, _actor: string, managerPin: string, username: string, displayName: string, pin: string, sessionToken: string) => {
+    ipcMain.handle('auth:addCashier', (event, username: string, displayName: string, pin: string, authorizationToken: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
-            const manager = dbDao.authenticateUser(session.user.username, managerPin);
-            if (!manager || !MANAGER_ROLES.includes(manager.role)) throw new Error('Manager verification failed.');
-            dbDao.addCashier(username, pin, manager.username, displayName);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'settings:write');
+            dbDao.addCashier(username, pin, grant.adminUsername, displayName);
             return { success: true };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
@@ -517,24 +523,22 @@ function setupIpcHandlers() {
         }
     });
 
-    ipcMain.handle('pos:addProduct', async (event, product: Omit<Product, 'id'>, authorizationToken: string, sessionToken: string) => {
+    ipcMain.handle('pos:addProduct', async (event, product: ProductInput, recipes: ProductRecipeInput[], authorizationToken: string, sessionToken: string) => {
         try {
-            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:add');
-            if (!product || typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120 || typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80 || !Number.isFinite(product.price) || product.price <= 0 || (product.cost_price != null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || !Number.isInteger(product.stock) || product.stock < 0 || (product.variant != null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Enter a valid item name, category, price, stock, cost, and optional variant.');
-            const newProd = dbDao.addProduct(product);
-            dbDao.addAuditLog('MENU_ITEM_CREATED', grant.adminUsername, `Menu item ${newProd.name} created by ${session.user.username} with stock ${newProd.stock}.`);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:add');
+            if (!product || typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120 || typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80 || !Number.isFinite(product.price) || product.price <= 0 || (product.cost_price != null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || (product.variant != null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Enter a valid item name, category, price, cost, and optional variant.');
+            const newProd = dbDao.addProduct(product, recipes, grant.adminUsername);
             return { success: true, data: newProd };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
     });
 
-    ipcMain.handle('pos:updateProduct', async (event, id: number, product: Partial<Product>, authorizationToken: string, sessionToken: string) => {
+    ipcMain.handle('pos:updateProduct', async (event, id: number, product: Partial<ProductInput>, recipes: ProductRecipeInput[], authorizationToken: string, sessionToken: string) => {
         try {
-            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:update');
-            if (!Number.isInteger(id) || id < 1 || !product || (product.name !== undefined && (typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120)) || (product.category !== undefined && (typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80)) || (product.price !== undefined && (!Number.isFinite(product.price) || product.price <= 0)) || (product.cost_price !== undefined && product.cost_price !== null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || (product.stock !== undefined && (!Number.isInteger(product.stock) || product.stock < 0)) || (product.variant !== undefined && product.variant !== null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Invalid menu item update.');
-            dbDao.updateProduct(id, product);
-            dbDao.addAuditLog('MENU_ITEM_UPDATED', grant.adminUsername, `Menu item #${id} updated by ${session.user.username}: ${Object.keys(product).join(', ') || 'no fields changed'}.`);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:update');
+            if (!Number.isInteger(id) || id < 1 || !product || (product.name !== undefined && (typeof product.name !== 'string' || !product.name.trim() || product.name.length > 120)) || (product.category !== undefined && (typeof product.category !== 'string' || !product.category.trim() || product.category.length > 80)) || (product.price !== undefined && (!Number.isFinite(product.price) || product.price <= 0)) || (product.cost_price !== undefined && product.cost_price !== null && (!Number.isFinite(product.cost_price) || product.cost_price < 0)) || (product.variant !== undefined && product.variant !== null && (typeof product.variant !== 'string' || product.variant.length > 40))) throw new Error('Invalid menu item update.');
+            dbDao.updateProduct(id, product, recipes, grant.adminUsername);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
@@ -543,14 +547,74 @@ function setupIpcHandlers() {
 
     ipcMain.handle('pos:deleteProduct', async (event, id: number, authorizationToken: string, sessionToken: string) => {
         try {
-            const { session, grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:delete');
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'menu:delete');
             if (!Number.isInteger(id) || id < 1) throw new Error('Invalid menu item ID.');
-            dbDao.deleteProduct(id);
-            dbDao.addAuditLog('MENU_ITEM_DELETED', grant.adminUsername, `Menu item #${id} deleted by ${session.user.username}.`);
+            dbDao.deleteProduct(id, grant.adminUsername);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
+    });
+
+    ipcMain.handle('pos:getProductRecipes', (event, productId: number, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken);
+            if (!Number.isInteger(productId) || productId < 1) throw new Error('Invalid menu item ID.');
+            return { success: true, data: dbDao.getProductRecipes(productId) };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:getRecipeIngredientOptions', (event, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken);
+            return { success: true, data: dbDao.getRecipeIngredientOptions() };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:getRawIngredients', (event, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken, ['admin']);
+            return { success: true, data: dbDao.getRawIngredients() };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:getInventoryMovements', (event, limit: number | undefined, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken, ['admin']);
+            return { success: true, data: dbDao.getInventoryMovements(limit) };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:addRawIngredient', (event, ingredient: Pick<RawIngredient, 'name' | 'unit_type' | 'current_stock_base' | 'low_stock_threshold_base'>, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'inventory:write');
+            const created = dbDao.addRawIngredient(ingredient, grant.adminUsername);
+            return { success: true, data: created };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:updateRawIngredient', (event, id: number, ingredient: Pick<RawIngredient, 'name' | 'unit_type' | 'current_stock_base' | 'low_stock_threshold_base'>, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'inventory:write');
+            dbDao.updateRawIngredient(id, ingredient, grant.adminUsername);
+            return { success: true };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:deleteRawIngredient', (event, id: number, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'inventory:write');
+            if (!Number.isInteger(id) || id < 1) throw new Error('Invalid raw ingredient ID.');
+            dbDao.deleteRawIngredient(id, grant.adminUsername);
+            return { success: true };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:recordRawPurchase', (event, purchase: RawInventoryPurchaseInput, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'inventory:write');
+            return { success: true, data: dbDao.recordRawPurchase(purchase, grant.adminUsername) };
+        } catch (err: any) { return { success: false, error: err.message }; }
     });
 
     // Tables
@@ -563,11 +627,11 @@ function setupIpcHandlers() {
         }
     });
 
-    ipcMain.handle('pos:setTableCount', (event, count: number, _actor: string, sessionToken: string) => {
+    ipcMain.handle('pos:setTableCount', (event, count: number, authorizationToken: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'settings:write');
             if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error('Invalid table count request.');
-            return { success: true, data: dbDao.setTableCount(count, session.user.username) };
+            return { success: true, data: dbDao.setTableCount(count, grant.adminUsername) };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
 
@@ -589,6 +653,7 @@ function setupIpcHandlers() {
         operator?: string;
         cashier_id?: string;
         server_name?: string;
+        order_uuid?: string;
         items_json: string;
         total_amount: number;
     }) => {
@@ -604,7 +669,7 @@ function setupIpcHandlers() {
             if (!Array.isArray(items) || items.length === 0 || items.some(item => !Number.isInteger(item.id) || !item.name || !Number.isFinite(item.price) || item.price < 0 || !Number.isInteger(item.quantity) || item.quantity < 1 || (item.variant !== undefined && item.variant !== null && (typeof item.variant !== 'string' || item.variant.length > 40)))) throw new Error('Receipt contains invalid items.');
             if (!Number.isFinite(orderData.total_amount) || orderData.total_amount < 0 || orderData.total_amount > 10000000) throw new Error('Invalid order total.');
             const settings = dbDao.getSettings();
-            const orderUuid = randomUUID();
+            const orderUuid = orderData.order_uuid || randomUUID();
             const serverName = orderData.server_name?.trim() || session.user.displayName || session.user.username;
             const persistedOrderData = { ...orderData, order_uuid: orderUuid, cashier_id: session.user.username, operator: session.user.displayName, server_name: serverName };
             const order = dbDao.createOrder(persistedOrderData);
@@ -656,27 +721,33 @@ function setupIpcHandlers() {
     ipcMain.handle('pos:getAnalytics', async (event, startDate: string, endDate: string, sessionToken: string) => {
         try {
             requireSession(event, sessionToken, MANAGER_ROLES);
-            const validDate = (value: string) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value;
-            if (!validDate(startDate) || !validDate(endDate) || startDate > endDate) throw new Error('Choose a valid start and end date.');
-            const span = (Date.parse(endDate + 'T00:00:00Z') - Date.parse(startDate + 'T00:00:00Z')) / 86400000;
-            if (span > 366) throw new Error('Date ranges are limited to one year.');
-            const employeeMetrics = dbDao.getEmployeeMetrics(startDate, endDate);
+            const [validatedStartDate, validatedEndDate] = validateAnalyticsDateRange(startDate, endDate);
+            const employeeMetrics = dbDao.getEmployeeMetrics(validatedStartDate, validatedEndDate);
             return {
                 success: true,
                 data: {
-                    orders: dbDao.getOrdersBetween(startDate, endDate),
-                    stats: dbDao.getPosStats(startDate, endDate),
+                    orders: dbDao.getOrdersBetween(validatedStartDate, validatedEndDate),
+                    stats: dbDao.getPosStats(validatedStartDate, validatedEndDate),
                     employeeMetrics,
-                    grossProfit: dbDao.getGrossProfit(startDate, endDate),
+                    grossProfit: dbDao.getGrossProfit(validatedStartDate, validatedEndDate),
                 } as AnalyticsReport
             };
+        } catch (err: any) { return { success: false, error: err.message }; }
+    });
+
+    ipcMain.handle('pos:getInventorySpending', (event, startDate: string, endDate: string, sessionToken: string) => {
+        try {
+            requireSession(event, sessionToken, MANAGER_ROLES);
+            const [validatedStartDate, validatedEndDate] = validateAnalyticsDateRange(startDate, endDate);
+            return { success: true, data: dbDao.getInventorySpending(validatedStartDate, validatedEndDate) };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
 
     ipcMain.handle('pos:getEmployeeMetrics', async (event, startDate: string, endDate: string, sessionToken: string) => {
         try {
             requireSession(event, sessionToken, MANAGER_ROLES);
-            return { success: true, data: dbDao.getEmployeeMetrics(startDate, endDate) };
+            const [validatedStartDate, validatedEndDate] = validateAnalyticsDateRange(startDate, endDate);
+            return { success: true, data: dbDao.getEmployeeMetrics(validatedStartDate, validatedEndDate) };
         } catch (err: any) { return { success: false, error: err.message }; }
     });
 
@@ -696,10 +767,10 @@ function setupIpcHandlers() {
         } catch (err: any) { return { success: false, error: err.message }; }
     });
 
-    ipcMain.handle('pos:updateKitchenStatus', (event, orderId: number, status: 'pending' | 'cooking' | 'ready', sessionToken: string) => {
+    ipcMain.handle('pos:updateKitchenStatus', (event, orderId: number, status: KitchenOrderStatus, sessionToken: string) => {
         try {
             const session = requireSession(event, sessionToken);
-            if (!Number.isInteger(orderId) || orderId < 1 || !['cooking', 'ready'].includes(status)) throw new Error('Invalid kitchen queue update.');
+            if (!Number.isInteger(orderId) || orderId < 1 || !['pending', 'cooking', 'ready', 'completed'].includes(status)) throw new Error('Invalid kitchen queue update.');
             dbDao.updateKitchenOrderStatus(orderId, status, session.user.username);
             return { success: true };
         } catch (err: any) { return { success: false, error: err.message }; }
@@ -715,10 +786,10 @@ function setupIpcHandlers() {
         }
     });
 
-    ipcMain.handle('pos:handoverShift', (event, sessionToken: string) => {
+    ipcMain.handle('pos:handoverShift', (event, authorizationToken: string, sessionToken: string) => {
         try {
-            const session = requireSession(event, sessionToken, MANAGER_ROLES);
-            return { success: true, data: dbDao.handoverShift(session.user.username) };
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'shift:handover');
+            return { success: true, data: dbDao.handoverShift(grant.adminUsername) };
         } catch (err) { return { success: false, error: err instanceof Error ? err.message : 'Could not close the shift.' }; }
     });
 
@@ -734,25 +805,41 @@ function setupIpcHandlers() {
 
     ipcMain.handle('pos:updateSetting', async (event, key: string, value: string, _actor: string, sessionToken: string) => {
         try {
-            const session = key === 'theme' ? requireSession(event, sessionToken) : requireSession(event, sessionToken, MANAGER_ROLES);
-            const allowedKeys = ['theme', 'font_scale', 'cafe_name', 'cafe_address', 'phone', 'currency', 'tax_rate', 'print_receipt_on_checkout', 'printer_interface', 'printer_ip', 'printer_port'];
-            if (!allowedKeys.includes(key) || typeof value !== 'string' || value.length > 300) throw new Error('Invalid setting.');
-            if (key === 'theme' && !['light', 'dark'].includes(value)) throw new Error('Invalid theme setting.');
-            const normalizedValue = key === 'printer_interface'
-                ? (['network', 'pos-80 printer (usb/network)', 'pos-80 printer', 'usb/network'].includes(value.trim().toLowerCase()) ? 'network' : 'none')
-                : value;
-            if (key === 'tax_rate' && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100)) throw new Error('Tax rate must be between 0 and 100.');
-            if (key === 'font_scale' && (!Number.isFinite(Number(value)) || Number(value) < 0.85 || Number(value) > 1.35)) throw new Error('Font scale must be between 0.85 and 1.35.');
-            if (key === 'print_receipt_on_checkout' && !['true', 'false'].includes(value)) throw new Error('Invalid auto-print setting.');
-            if (key === 'printer_interface' && !['none', 'network'].includes(normalizedValue)) throw new Error('Invalid printer interface.');
-            if (key === 'printer_port' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) throw new Error('Port must be between 1 and 65535.');
-            if (key === 'printer_ip' && isIP(value) === 0) throw new Error('Enter a valid printer IP address.');
-            if (['cafe_name', 'currency'].includes(key) && !value.trim()) throw new Error('This setting cannot be blank.');
-            dbDao.updateSetting(key, normalizedValue, session.user.username);
+            const session = requireSession(event, sessionToken);
+            if (key !== 'theme' || typeof value !== 'string' || value.length > 300 || !['light', 'dark'].includes(value)) throw new Error('Settings require an Admin PIN grant.');
+            dbDao.updateSetting(key, value, session.user.username);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
         }
+    });
+
+    ipcMain.handle('pos:updateSettings', (event, settings: Partial<PosSettings>, authorizationToken: string, sessionToken: string) => {
+        try {
+            const { grant } = consumeAdminOverride(event, sessionToken, authorizationToken, 'settings:write');
+            const allowedKeys = new Set(['theme', 'font_scale', 'cafe_name', 'cafe_address', 'phone', 'currency', 'tax_rate', 'print_receipt_on_checkout', 'printer_interface', 'printer_ip', 'printer_port']);
+            if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('Invalid settings payload.');
+            const entries = Object.entries(settings);
+            if (!entries.length || entries.length > allowedKeys.size) throw new Error('Invalid settings payload.');
+            const normalized: Record<string, string> = {};
+            for (const [key, rawValue] of entries) {
+                if (!allowedKeys.has(key) || typeof rawValue !== 'string' || rawValue.length > 300) throw new Error('Invalid setting.');
+                const value = rawValue;
+                if (key === 'theme' && !['light', 'dark'].includes(value)) throw new Error('Invalid theme setting.');
+                const normalizedValue = key === 'printer_interface'
+                    ? (['network', 'pos-80 printer (usb/network)', 'pos-80 printer', 'usb/network'].includes(value.trim().toLowerCase()) ? 'network' : 'none')
+                    : value;
+                if (key === 'tax_rate' && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100)) throw new Error('Tax rate must be between 0 and 100.');
+                if (key === 'font_scale' && (!Number.isFinite(Number(value)) || Number(value) < 0.85 || Number(value) > 1.35)) throw new Error('Font scale must be between 0.85 and 1.35.');
+                if (key === 'print_receipt_on_checkout' && !['true', 'false'].includes(value)) throw new Error('Invalid auto-print setting.');
+                if (key === 'printer_port' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) throw new Error('Port must be between 1 and 65535.');
+                if (key === 'printer_ip' && isIP(value) === 0) throw new Error('Enter a valid printer IP address.');
+                if (['cafe_name', 'currency'].includes(key) && !value.trim()) throw new Error('This setting cannot be blank.');
+                normalized[key] = normalizedValue;
+            }
+            dbDao.updateSettings(normalized as Partial<PosSettings>, grant.adminUsername);
+            return { success: true };
+        } catch (err: any) { return { success: false, error: err.message }; }
     });
 
     // Thermal Printing
@@ -786,12 +873,4 @@ function setupIpcHandlers() {
         } catch (err) { return { success: false, error: err instanceof Error ? err.message : "Could not load audit logs." }; }
     });
 
-    ipcMain.handle("pos:logAudit", async (event, action: string, _actor: string, details: string, sessionToken: string) => {
-        try {
-            const session = requireSession(event, sessionToken);
-            if (typeof action !== "string" || !/^[A-Z][A-Z0-9_]{2,63}$/.test(action) || typeof details !== "string" || details.trim().length < 1 || details.length > 500) throw new Error("Invalid audit log entry.");
-            dbDao.addAuditLog(action, session.user.username, details.trim());
-            return { success: true };
-        } catch (err) { return { success: false, error: err instanceof Error ? err.message : "Could not save audit log." }; }
-    });
 }
